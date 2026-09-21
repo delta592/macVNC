@@ -9,12 +9,13 @@ jobs:
       - uses: actions/checkout@v3
       - name: Install Build Dependencies
         run: |
-          brew install libvncserver
+          brew install libvncserver openssl
       - name: Build
         run: |
           mkdir build
           cd build
-          cmake ..
+          # CI runners have single-arch Homebrew bottles
+          cmake .. -DMACVNC_UNIVERSAL=OFF
           cmake --build .
           cmake --install .
       - name: Archive App Bundle
