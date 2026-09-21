@@ -1,4 +1,4 @@
-[![CI](https://github.com/LibVNC/macVNC/actions/workflows/ci.yml/badge.svg)](https://github.com/LibVNC/macVNC/actions/workflows/ci.yml)
+[![CI](https://github.com/delta592/macVNC/actions/workflows/ci.yml/badge.svg)](https://github.com/delta592/macVNC/actions/workflows/ci.yml)
 
 # About
 
