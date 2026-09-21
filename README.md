@@ -16,115 +16,91 @@ GPL dump by AT&T Cambridge.
 * Multi-monitor support.
 * **VeNCrypt / TLS encryption** (default) — no SSH tunnel required. Works with
   encryption-capable viewers such as TigerVNC Viewer.
-* **Universal binary** (arm64 + x86_64) when built with fat/universal dependencies.
+* **Universal binary** (arm64 + x86_64) via per-arch from-source dependencies.
 
 ## Supported environments
 
-| | Older Intel host | Modern Apple Silicon host |
-|--|--|--|
-| macOS | 15.x | 26+/27+ (and generally 15+) |
-| Package manager | **MacPorts** (`/opt/local`) | **Homebrew** (`/opt/homebrew`) |
-| CPU | x86_64 | arm64 |
-| LibVNCServer TLS | GnuTLS (MacPorts default) | OpenSSL (Homebrew bottle) |
+| | Requirement |
+|--|--|
+| macOS | 15.0+ (ScreenCaptureKit) |
+| Toolchain | Xcode Command Line Tools + CMake |
+| Architectures | arm64, x86_64, or universal (both) |
+| LibVNCServer TLS | OpenSSL (built from source with WebSockets) |
 
-Minimum deployment target is **macOS 15.0**. ScreenCaptureKit is required.
+Minimum deployment target is **macOS 15.0**.
 
 # Building
 
-## Dependencies
+Dependencies (**OpenSSL** and **LibVNCServer**) are built from source — no
+Homebrew or MacPorts packages are required for linking. You still need:
 
-You need **LibVNCServer with TLS** (OpenSSL *or* GnuTLS) plus **OpenSSL** for
-certificate generation, and CMake.
+* Xcode Command Line Tools (`xcode-select --install`)
+* [CMake](https://cmake.org/download/) ≥ 3.18 on `PATH`
+* [ccache](https://ccache.dev/) on `PATH` (e.g. `brew install ccache`)
+* `curl`, `tar`, `make`, Apple Clang (all ship with the CLT)
 
-### MacPorts (Intel / universal builds)
+## 1. Build dependencies
 
 ```bash
-sudo port install cmake openssl LibVNCServer tigervnc
-# For a single universal .app (recommended on Apple Silicon with MacPorts):
-sudo port install cmake +universal openssl +universal LibVNCServer +universal
+# Both architectures → deps/prefix/universal (recommended)
+./scripts/build-deps.sh
+
+# Or a single architecture (faster for local/CI native builds)
+./scripts/build-deps.sh --arch="$(uname -m)"
 ```
 
-MacPorts `LibVNCServer` uses **GnuTLS** (`WITH_OPENSSL=OFF`). That is supported.
+This downloads pinned OpenSSL and LibVNCServer releases, builds each requested
+CPU architecture separately (static libraries), then `lipo`s them into
+`deps/prefix/universal` when more than one arch is requested.
 
-### Homebrew (Apple Silicon native)
+| Path | Contents |
+|------|----------|
+| `deps/src/` | Downloaded tarballs + extracted trees |
+| `deps/prefix/<arch>/` | Per-arch install prefix |
+| `deps/prefix/universal/` | Fat static libs + headers |
 
-```bash
-brew install cmake openssl libvncserver
-# Viewer (optional): brew install --cask tigervnc-viewer
-```
+Rebuild with `./scripts/build-deps.sh --force`. Remove everything with
+`make distclean`.
 
-Homebrew `libvncserver` uses **OpenSSL**. Confirm:
+## 2. Configure & build macVNC
 
-```bash
-grep LIBVNCSERVER_HAVE_LIBSSL "$(brew --prefix libvncserver)/include/rfb/rfbconfig.h"
-# expect: #define LIBVNCSERVER_HAVE_LIBSSL 1
-```
+CMake auto-detects `deps/prefix/universal` (or a single-arch prefix).
 
-## Configure & build
-
-CMake searches `/opt/local` (MacPorts), `/opt/homebrew`, and `/usr/local`.
-
-### Universal app (arm64 + x86_64) — default when deps are fat
-
-Requires **fat/universal** LibVNCServer and OpenSSL. Prefer building with
-**MacPorts `+universal`** (on Apple Silicon or a machine that can produce both
-slices). Homebrew bottles are usually single-arch; CMake will warn and fall
-back to native.
-
-A binary that must **run on macOS 15 Intel** should be built against MacPorts
-libraries on a macOS 15 (or compatible) SDK — not against Homebrew bottles
-built for macOS 26/27.
+### Universal app (arm64 + x86_64)
 
 ```bash
-cmake -S . -B build \
-  -DCMAKE_PREFIX_PATH=/opt/local \
-  -DMACVNC_UNIVERSAL=ON \
-  -DCMAKE_OSX_DEPLOYMENT_TARGET=15.0
-cmake --build build
-# or: ./scripts/build-universal.sh
-lipo -info build/macVNC.app/Contents/MacOS/macVNC
+./scripts/build-universal.sh
+# or: make universal
+lipo -info build-universal/macVNC.app/Contents/MacOS/macVNC
 # expect: Architectures in the fat file: ... x86_64 arm64
 ```
 
-### Native-only (when deps are single-arch, e.g. Homebrew arm64)
+### Native-only
 
 ```bash
+./scripts/build-deps.sh --arch="$(uname -m)"
 cmake -S . -B build -DMACVNC_UNIVERSAL=OFF
 cmake --build build
 ```
 
-### Lipo two machine-local builds
-
-If you build arm64 on Apple Silicon (Homebrew) and x86_64 on Intel (MacPorts):
-
-```bash
-# on each machine:
-cmake -S . -B build -DMACVNC_UNIVERSAL=OFF && cmake --build build
-# copy both binaries together, then:
-lipo -create -output macVNC.universal \
-  macVNC.arm64 macVNC.x86_64
-```
-
-You must also ship matching-arch (or fat) copies of linked dylibs, or use
-`cmake --install` / `fixup_bundle` per slice. Prefer MacPorts `+universal` when
-you want one self-contained universal `.app`.
-
 ### Make / Ninja / ccache
 
-A thin `Makefile` wraps CMake:
-
 ```bash
-make                              # configure + build (Unix Makefiles)
+make deps                         # from-source OpenSSL + LibVNCServer (optional;
+                                  #   also runs automatically before configure)
+make                              # ensure deps + configure + build
 make GENERATOR=Ninja              # faster incremental builds
-make UNIVERSAL=OFF                # native arch (Homebrew)
+make UNIVERSAL=OFF                # native arch (deps + app)
+make DEPS_ARCH=arm64 deps         # single-arch deps only
 make test                         # CTest unit tests
 make COVERAGE=ON coverage         # LLVM coverage + lcov/HTML under build/
 make format-check                 # clang-format on maintained sources
 make tidy                         # clang-tidy via compile_commands.json
 ```
 
-`ccache` is used automatically when present (`brew install ccache`). Disable with
-`-DMACVNC_USE_CCACHE=OFF`.
+`ccache` is **required** (configure fails if it is missing). Install with
+`brew install ccache` or see https://ccache.dev/download.html. Bypass only if
+needed with `-DMACVNC_USE_CCACHE=OFF`.
 
 # Running
 
@@ -157,38 +133,10 @@ spaces so TigerVNC’s `-X509CA` works.)
 
 ### TigerVNC Viewer
 
-**Homebrew cask (newer):**
-
 ```bash
 /Applications/TigerVNC.app/Contents/MacOS/vncviewer \
   -X509CA "$HOME/.macvnc/cert.pem" host::5901
 ```
-
-**MacPorts (often 1.14.x):**
-
-```bash
-/opt/local/bin/vncviewer -X509CA "$HOME/.macvnc/cert.pem" host::5901
-# If an older viewer picks plain VncAuth, force:
-/opt/local/bin/vncviewer -SecurityTypes=X509Vnc -X509CA "$HOME/.macvnc/cert.pem" host::5901
-```
-
-`/opt/local/bin/vncviewer` is a wrapper around
-`/Applications/MacPorts/TigerVNC Viewer.app`. That app is **unsigned**; on
-macOS 15+ Sequoia, Local Network privacy can reject it with **No route to
-host** when launched from the console (SSH/`nc` may still work). Ad-hoc sign
-once, then allow Local Network when prompted:
-
-```bash
-sudo codesign --force --deep --sign - "/Applications/MacPorts/TigerVNC Viewer.app"
-open -a "/Applications/MacPorts/TigerVNC Viewer.app" --args host::5901
-```
-
-Confirm **TigerVNC Viewer** is enabled under System Settings → Privacy &
-Security → Local Network. Re-run `codesign` after a MacPorts `tigervnc`
-upgrade if the symptom returns.
-
-(Recent macVNC builds hide stock VncAuth in encrypted mode so MacPorts 1.14
-should prefer VeNCrypt without the extra flag.)
 
 Apple Screen Sharing does **not** speak VeNCrypt.
 
@@ -222,9 +170,6 @@ Optional XCTest bundle (same cases) when generating an Xcode project:
 cmake -S . -B build-xcode -G Xcode -DMACVNC_BUILD_XCTEST=ON -DMACVNC_UNIVERSAL=OFF
 cmake --build build-xcode
 ```
-
-OCMock is reserved for future ScreenCapturer isolation tests (`brew install
-ocmock` when adding those).
 
 ## Coverage
 

@@ -2,8 +2,10 @@
 # Usage: make [TARGET]  [BUILD_DIR=build] [GENERATOR=Ninja]
 #
 # Examples:
-#   make                 # configure (if needed) + build
+#   make                 # ensure deps from source + configure + build
+#   make deps            # build OpenSSL + LibVNCServer from source only
 #   make GENERATOR=Ninja
+#   make UNIVERSAL=OFF   # native arch (deps + app)
 #   make test
 #   make coverage
 #   make format
@@ -13,13 +15,14 @@
 BUILD_DIR  ?= build
 GENERATOR  ?=
 PREFIX     ?=
-UNIVERSAL  ?= OFF
+UNIVERSAL  ?= ON
 COVERAGE   ?= OFF
 JOBS       ?=
+DEPS_ARCH  ?=
 
 CMAKE_FLAGS := -DMACVNC_UNIVERSAL=$(UNIVERSAL) -DMACVNC_ENABLE_COVERAGE=$(COVERAGE)
 ifneq ($(PREFIX),)
-  CMAKE_FLAGS += -DCMAKE_PREFIX_PATH=$(PREFIX)
+  CMAKE_FLAGS += -DMACVNC_DEPS_PREFIX=$(PREFIX)
 endif
 
 CMAKE_GEN :=
@@ -30,6 +33,14 @@ endif
 BUILD_OPTS :=
 ifneq ($(JOBS),)
   BUILD_OPTS += -j$(JOBS)
+endif
+
+DEPS_ARGS :=
+ifneq ($(DEPS_ARCH),)
+  DEPS_ARGS += --arch=$(DEPS_ARCH)
+endif
+ifneq ($(JOBS),)
+  export JOBS
 endif
 
 .DEFAULT_GOAL := all
@@ -45,21 +56,61 @@ help: ## List targets and current variable defaults
 	@printf "  %-18s %s\n" "UNIVERSAL" "$(UNIVERSAL)"
 	@printf "  %-18s %s\n" "COVERAGE" "$(COVERAGE)"
 	@printf "  %-18s %s\n" "PREFIX" "$(PREFIX)"
+	@printf "  %-18s %s\n" "DEPS_ARCH" "$(DEPS_ARCH)"
 	@printf "  %-18s %s\n" "JOBS" "$(JOBS)"
+
+.PHONY: deps
+deps: ## Build OpenSSL + LibVNCServer from source (see scripts/build-deps.sh)
+	./scripts/build-deps.sh $(DEPS_ARGS)
+
+# Stamp / library that configure requires. UNIVERSAL=ON needs fat libs;
+# UNIVERSAL=OFF can use a single host-arch prefix (faster).
+DEPS_UNIVERSAL_LIB := deps/prefix/universal/lib/libvncserver.a
+DEPS_HOST_LIB := deps/prefix/$(shell uname -m)/lib/libvncserver.a
+
+.PHONY: ensure-deps
+ensure-deps: ## Build from-source deps if missing (honours UNIVERSAL / DEPS_ARCH)
+ifeq ($(UNIVERSAL),ON)
+	@need=0; \
+	if [[ ! -f "$(DEPS_UNIVERSAL_LIB)" ]]; then need=1; \
+	else \
+	  archs=$$(lipo -archs "$(DEPS_UNIVERSAL_LIB)" 2>/dev/null || true); \
+	  echo "$$archs" | grep -q arm64 || need=1; \
+	  echo "$$archs" | grep -q x86_64 || need=1; \
+	fi; \
+	if [[ $$need -eq 1 ]]; then \
+	  echo "Building from-source dependencies (universal)…"; \
+	  ./scripts/build-deps.sh $(DEPS_ARGS); \
+	fi
+else
+	@if [[ ! -f "$(DEPS_HOST_LIB)" && ! -f "$(DEPS_UNIVERSAL_LIB)" ]]; then \
+	  echo "Building from-source dependencies ($(shell uname -m))…"; \
+	  if [[ -n "$(DEPS_ARCH)" ]]; then \
+	    ./scripts/build-deps.sh $(DEPS_ARGS); \
+	  else \
+	    ./scripts/build-deps.sh --arch=$$(uname -m); \
+	  fi; \
+	fi
+endif
 
 .PHONY: all
 all: build ## Configure (if needed) and build
 
 .PHONY: configure
-configure: ## Run cmake configure into BUILD_DIR
-	cmake -S . -B $(BUILD_DIR) $(CMAKE_GEN) $(CMAKE_FLAGS)
+configure: ensure-deps ## Ensure deps, then cmake configure into BUILD_DIR
+	env -u PKG_CONFIG_PATH -u LDFLAGS -u CPPFLAGS \
+	  cmake -S . -B $(BUILD_DIR) $(CMAKE_GEN) $(CMAKE_FLAGS)
 
-$(BUILD_DIR)/CMakeCache.txt:
+$(BUILD_DIR)/CMakeCache.txt: ensure-deps
 	@$(MAKE) configure
 
 .PHONY: build
-build: $(BUILD_DIR)/CMakeCache.txt ## Build the project
+build: $(BUILD_DIR)/CMakeCache.txt ## Ensure deps, configure (if needed), and build
 	cmake --build $(BUILD_DIR) $(BUILD_OPTS)
+
+.PHONY: universal
+universal: ## Build fat deps (if needed) and a universal .app
+	./scripts/build-universal.sh $(BUILD_DIR)
 
 .PHONY: install
 install: build ## Install / finalize the .app bundle
@@ -68,6 +119,10 @@ install: build ## Install / finalize the .app bundle
 .PHONY: clean
 clean: ## Remove BUILD_DIR
 	rm -rf $(BUILD_DIR)
+
+.PHONY: distclean
+distclean: clean ## Remove BUILD_DIR and deps/
+	rm -rf deps
 
 .PHONY: test
 test: build ## Build and run CTest
@@ -82,7 +137,7 @@ coverage: ## Clean rebuild with coverage, run tests, write llvm-cov reports
 .PHONY: format
 format: ## clang-format -i on src/ and tests/
 	@command -v clang-format >/dev/null || \
-	  { echo "clang-format not in PATH (try: brew install clang-format)"; exit 1; }
+	  { echo "clang-format not in PATH"; exit 1; }
 	find src tests -type f \( -name '*.c' -o -name '*.h' -o -name '*.m' \) \
 	  -print0 | xargs -0 clang-format -i
 
@@ -91,7 +146,7 @@ format: ## clang-format -i on src/ and tests/
 .PHONY: format-check
 format-check: ## clang-format --dry-run on maintained sources + tests
 	@command -v clang-format >/dev/null || \
-	  { echo "clang-format not in PATH (try: brew install clang-format)"; exit 1; }
+	  { echo "clang-format not in PATH"; exit 1; }
 	@ok=0; \
 	for f in src/cert_manager.c src/cert_manager.h src/vencrypt.c src/vencrypt.h \
 	         $$(find tests -type f \( -name '*.c' -o -name '*.h' -o -name '*.m' \) 2>/dev/null); do \

@@ -1,6 +1,7 @@
 /compile_commands.json
 /build
 /build-*/
+/deps/
 *~
 /.cache
 /.DS_Store
