@@ -144,7 +144,9 @@ auto-generates a self-signed cert/key under:
 ~/.macvnc/key.pem
 ```
 
-(The private key is mode `0600`. Paths avoid spaces so TigerVNC’s `-X509CA` works.)
+(The private key is created mode `0600` and the certificate mode `0644`,
+both via `open`+`fchmod` so creation is never world-writable. Paths avoid
+spaces so TigerVNC’s `-X509CA` works.)
 
 | Flag | Meaning |
 |------|---------|

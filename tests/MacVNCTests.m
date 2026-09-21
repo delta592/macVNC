@@ -51,7 +51,7 @@
     XCTAssertEqualObjects(@(key), @(expectKey));
 }
 
-- (void)testCertEnsureWritesKeyMode0600
+- (void)testCertEnsureWritesSecureModes
 {
     char cert[512], key[512];
     struct stat st;
@@ -59,6 +59,9 @@
     XCTAssertTrue(macvncCertGetPaths(cert, sizeof(cert), key, sizeof(key)));
     XCTAssertEqual(stat(key, &st), 0);
     XCTAssertEqual(st.st_mode & 0777, 0600);
+    XCTAssertEqual(stat(cert, &st), 0);
+    XCTAssertEqual(st.st_mode & 0777, 0644);
+    XCTAssertEqual(st.st_mode & 0002, 0); /* not world-writable */
 }
 
 @end

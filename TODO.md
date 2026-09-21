@@ -18,7 +18,7 @@ and from `macvnc-fork-plan.md`.
 |------|--------|
 | Security | In-tree VeNCrypt server handler (`src/vencrypt.c`). LibVNCServer 0.9.x only implements VeNCrypt on the **client**; the plan’s “just enable it” assumption does not hold for the server. Stock VncAuth/None types are neutered in encrypted mode so TigerVNC 1.14 does not prefer plain auth. |
 | TLS I/O | Uses libvncserver’s `cl->sslctx` path (compiled when WebSockets+OpenSSL are enabled — true for Homebrew’s bottle). |
-| Certs | Auto-generated self-signed cert on first run (`src/cert_manager.c`). |
+| Certs | Auto-generated self-signed cert on first run (`src/cert_manager.c`); key `0600`, cert `0644` via `open`+`fchmod`. |
 | CLI | `-security {vencrypt\|anontls\|plain}`, `-regen-cert`. |
 | Default posture | Encrypted modes refuse unencrypted VNC-auth attempts via a password-check gate. |
 

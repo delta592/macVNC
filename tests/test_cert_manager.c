@@ -3,6 +3,7 @@
 #include "cert_manager.h"
 
 #include <errno.h>
+#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -12,6 +13,27 @@
 static char g_tmpHome[512];
 static char g_savedHome[512];
 static int g_hadSavedHome = 0;
+
+/** Same pattern as production: create with an explicit mode (not fopen 0666). */
+static FILE *
+openWriteWithMode(const char *path, mode_t mode)
+{
+    int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, mode);
+    FILE *fp;
+
+    if (fd < 0)
+        return NULL;
+    if (fchmod(fd, mode) != 0) {
+        close(fd);
+        return NULL;
+    }
+    fp = fdopen(fd, "w");
+    if (!fp) {
+        close(fd);
+        return NULL;
+    }
+    return fp;
+}
 
 static void
 setupTempHome(void)
@@ -100,6 +122,8 @@ testEnsureCreatesFiles(void)
     MACVNC_CHECK(macvncCertEnsure(FALSE));
     MACVNC_CHECK(macvncCertGetPaths(cert, sizeof(cert), key, sizeof(key)));
     MACVNC_CHECK(stat(cert, &st) == 0);
+    MACVNC_CHECK((st.st_mode & 0777) == 0644);
+    MACVNC_CHECK((st.st_mode & 0002) == 0); /* not world-writable */
     MACVNC_CHECK(stat(key, &st) == 0);
     MACVNC_CHECK((st.st_mode & 0777) == 0600);
 }
@@ -156,6 +180,8 @@ testForceRegen(void)
 
     MACVNC_CHECK(stat(key, &st) == 0);
     MACVNC_CHECK((st.st_mode & 0777) == 0600);
+    MACVNC_CHECK(stat(cert, &st) == 0);
+    MACVNC_CHECK((st.st_mode & 0777) == 0644);
 }
 
 static void
@@ -207,7 +233,7 @@ testLogFingerprintCorruptCert(void)
     FILE *fp;
 
     MACVNC_CHECK(macvncCertGetPaths(cert, sizeof(cert), key, sizeof(key)));
-    fp = fopen(cert, "w");
+    fp = openWriteWithMode(cert, 0644);
     MACVNC_CHECK(fp != NULL);
     fputs("not-a-pem-certificate\n", fp);
     fclose(fp);
@@ -268,7 +294,7 @@ testEnsureFailsWhenCertDirBlockedByFile(void)
     unlink(key);
     snprintf(blocker, sizeof(blocker), "%s/.macvnc", g_tmpHome);
     rmdir(blocker);
-    fp = fopen(blocker, "w");
+    fp = openWriteWithMode(blocker, 0600);
     MACVNC_CHECK(fp != NULL);
     fputs("blocked\n", fp);
     fclose(fp);
