@@ -44,11 +44,14 @@ jobs:
           name: coverage-lcov
           path: build/coverage.lcov
       # Uploads when CODECOV_TOKEN is configured as a repo secret.
+      # secrets.* is not allowed in steps.if; map to env first.
       - name: Upload to Codecov
-        if: ${{ secrets.CODECOV_TOKEN != '' }}
+        if: env.CODECOV_TOKEN != ''
+        env:
+          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
         uses: codecov/codecov-action@v5
         with:
-          token: ${{ secrets.CODECOV_TOKEN }}
+          token: ${{ env.CODECOV_TOKEN }}
           files: build/coverage.lcov
           fail_ci_if_error: false
 
