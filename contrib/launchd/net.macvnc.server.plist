@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  LaunchAgent template for macVNC.
+  Do not load this file directly — use scripts/launchd.sh which substitutes
+  MACVNC_PROGRAM, MACVNC_RFBPORT, MACVNC_SECURITY, and MACVNC_PASSWD_ARGS.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>net.macvnc.server</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>@MACVNC_PROGRAM@</string>
+    <string>-rfbport</string>
+    <string>@MACVNC_RFBPORT@</string>
+    <string>-security</string>
+    <string>@MACVNC_SECURITY@</string>@MACVNC_PASSWD_ARGS@
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>/tmp/macvnc.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>/tmp/macvnc.err.log</string>
+  <key>ProcessType</key>
+  <string>Interactive</string>
+</dict>
+</plist>

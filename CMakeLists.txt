@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.18)
-project(macVNC VERSION 0.1.0 LANGUAGES C)
+project(macVNC VERSION 0.1.0 LANGUAGES C OBJC)
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 if(CMAKE_GENERATOR MATCHES "Unix Makefiles|Ninja")
@@ -9,6 +9,29 @@ if(CMAKE_GENERATOR MATCHES "Unix Makefiles|Ninja")
           ${CMAKE_BINARY_DIR}/compile_commands.json
           ${CMAKE_CURRENT_SOURCE_DIR}
       )
+endif()
+
+#
+# Speed: ccache when available (override with -DMACVNC_USE_CCACHE=OFF)
+#
+option(MACVNC_USE_CCACHE "Use ccache as compiler launcher if found" ON)
+if(MACVNC_USE_CCACHE)
+  find_program(MACVNC_CCACHE_PROGRAM ccache)
+  if(MACVNC_CCACHE_PROGRAM)
+    message(STATUS "Using ccache: ${MACVNC_CCACHE_PROGRAM}")
+    set(CMAKE_C_COMPILER_LAUNCHER "${MACVNC_CCACHE_PROGRAM}")
+    set(CMAKE_OBJC_COMPILER_LAUNCHER "${MACVNC_CCACHE_PROGRAM}")
+  endif()
+endif()
+
+#
+# Code coverage (Apple Clang / LLVM instrumentation)
+#
+option(MACVNC_ENABLE_COVERAGE "Build with LLVM source-based coverage" OFF)
+if(MACVNC_ENABLE_COVERAGE)
+  message(STATUS "Coverage instrumentation enabled")
+  add_compile_options(-fprofile-instr-generate -fcoverage-mapping -O0 -g)
+  add_link_options(-fprofile-instr-generate)
 endif()
 
 #
@@ -114,6 +137,7 @@ if(APPLE)
     message(STATUS "macOS architectures: (native)")
   endif()
 endif()
+
 #
 # Sources
 #
@@ -146,6 +170,50 @@ target_link_libraries(${PROJECT_NAME} LibVNCServer::vncserver OpenSSL::SSL OpenS
   ${FOUNDATION})
 if(GnuTLS_FOUND)
   target_link_libraries(${PROJECT_NAME} GnuTLS::GnuTLS)
+endif()
+
+#
+# Unit tests (CTest always; optional XCTest when using the Xcode generator)
+#
+option(MACVNC_BUILD_TESTS "Build CTest unit tests" ON)
+option(MACVNC_BUILD_XCTEST "Build XCTest bundle (Xcode generator)" OFF)
+
+if(MACVNC_BUILD_TESTS)
+  enable_testing()
+
+  add_executable(test_cert_manager
+    tests/test_cert_manager.c
+    src/cert_manager.c
+  )
+  target_include_directories(test_cert_manager PRIVATE src tests)
+  target_link_libraries(test_cert_manager
+    LibVNCServer::vncserver OpenSSL::SSL OpenSSL::Crypto)
+  add_test(NAME cert_manager COMMAND test_cert_manager)
+  set_tests_properties(cert_manager PROPERTIES
+    ENVIRONMENT "LLVM_PROFILE_FILE=${CMAKE_BINARY_DIR}/test_cert_manager-%p.profraw")
+
+  add_executable(test_security_mode tests/test_security_mode.c)
+  target_include_directories(test_security_mode PRIVATE src tests)
+  # Header-only under test; still need rfb/rfb.h from LibVNCServer for the enum header.
+  target_link_libraries(test_security_mode LibVNCServer::vncserver)
+  add_test(NAME security_mode COMMAND test_security_mode)
+  set_tests_properties(security_mode PROPERTIES
+    ENVIRONMENT "LLVM_PROFILE_FILE=${CMAKE_BINARY_DIR}/test_security_mode-%p.profraw")
+endif()
+
+if(MACVNC_BUILD_XCTEST)
+  if(NOT CMAKE_GENERATOR MATCHES "Xcode")
+    message(WARNING "MACVNC_BUILD_XCTEST is most useful with -G Xcode")
+  endif()
+  find_package(XCTest REQUIRED)
+  xctest_add_bundle(MacVNCTests ${PROJECT_NAME}
+    tests/MacVNCTests.m
+    src/cert_manager.c
+  )
+  target_include_directories(MacVNCTests PRIVATE src)
+  target_link_libraries(MacVNCTests
+    LibVNCServer::vncserver OpenSSL::SSL OpenSSL::Crypto)
+  xctest_add_test(XCTest.MacVNC MacVNCTests)
 endif()
 
 #
