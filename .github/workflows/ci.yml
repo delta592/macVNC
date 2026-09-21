@@ -18,8 +18,8 @@ jobs:
           cmake .. -DMACVNC_UNIVERSAL=OFF
           cmake --build .
           cmake --install .
-      - name: Archive App Bundle
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: macVNC App Bundle
-          path: build/*.app
+      # - name: Archive App Bundle
+      #   uses: actions/upload-artifact@v4
+      #   with:
+      #     name: macVNC App Bundle
+      #     path: build/*.app
