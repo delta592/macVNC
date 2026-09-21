@@ -7,9 +7,8 @@
 extern "C" {
 #endif
 
-/** Directory: ~/Library/Application Support/macVNC */
-rfbBool macvncCertGetPaths(char *certPath, size_t certPathSize,
-                           char *keyPath, size_t keyPathSize);
+/** Paths under ~/.macvnc/ (no spaces — TigerVNC -X509CA compatible). */
+rfbBool macvncCertGetPaths(char *certPath, size_t certPathSize, char *keyPath, size_t keyPathSize);
 
 /**
  * Ensure a self-signed cert/key pair exists.

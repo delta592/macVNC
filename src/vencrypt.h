@@ -13,7 +13,19 @@ typedef enum {
     MACVNC_SECURITY_PLAIN
 } MacVNCSecurityMode;
 
-const char *macvncSecurityModeName(MacVNCSecurityMode mode);
+static inline const char *
+macvncSecurityModeName(MacVNCSecurityMode mode)
+{
+    switch (mode) {
+    case MACVNC_SECURITY_VENCRYPT_X509:
+        return "VeNCrypt+X.509 (encrypted, default)";
+    case MACVNC_SECURITY_ANONTLS:
+        return "AnonTLS (encrypted, server identity NOT authenticated)";
+    case MACVNC_SECURITY_PLAIN:
+        return "plain VNC (UNENCRYPTED — compatibility only)";
+    }
+    return "unknown";
+}
 
 /**
  * Configure encryption for the server.

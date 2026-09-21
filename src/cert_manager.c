@@ -59,8 +59,7 @@ ensureParentDir(const char *filePath)
 }
 
 rfbBool
-macvncCertGetPaths(char *certPath, size_t certPathSize,
-                   char *keyPath, size_t keyPathSize)
+macvncCertGetPaths(char *certPath, size_t certPathSize, char *keyPath, size_t keyPathSize)
 {
     const char *home = getenv("HOME");
     if (!home || !*home) {
@@ -98,8 +97,7 @@ addSanExtensions(X509 *x509)
      * accept the cert once (or regenerate later with a custom cert).
      */
     if (hostname[0]) {
-        snprintf(san, sizeof(san),
-                 "DNS:localhost,DNS:%s,IP:127.0.0.1,IP:::1", hostname);
+        snprintf(san, sizeof(san), "DNS:localhost,DNS:%s,IP:127.0.0.1,IP:::1", hostname);
     } else {
         snprintf(san, sizeof(san), "DNS:localhost,IP:127.0.0.1,IP:::1");
     }
@@ -164,8 +162,7 @@ writeSelfSignedCert(const char *certPath, const char *keyPath)
     }
 
     name = X509_get_subject_name(x509);
-    X509_NAME_add_entry_by_txt(name, "CN", MBSTRING_ASC,
-                               (unsigned char *)cn, -1, -1, 0);
+    X509_NAME_add_entry_by_txt(name, "CN", MBSTRING_ASC, (unsigned char *)cn, -1, -1, 0);
     X509_set_issuer_name(x509, name);
 
     if (!addSanExtensions(x509))
@@ -223,9 +220,7 @@ macvncCertEnsure(rfbBool forceRegen)
     if (!macvncCertGetPaths(certPath, sizeof(certPath), keyPath, sizeof(keyPath)))
         return FALSE;
 
-    if (!forceRegen &&
-        stat(certPath, &st) == 0 &&
-        stat(keyPath, &st) == 0) {
+    if (!forceRegen && stat(certPath, &st) == 0 && stat(keyPath, &st) == 0) {
         return TRUE;
     }
 

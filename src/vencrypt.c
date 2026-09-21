@@ -40,7 +40,7 @@ extern int rfbssl_init(rfbClientPtr cl);
 
 static MacVNCSecurityMode gSecurityMode = MACVNC_SECURITY_VENCRYPT_X509;
 static rfbPasswordCheckProcPtr gOriginalPasswordCheck = NULL;
-static char *gDummyPasswdList[2] = { "__macvnc_block_unencrypted__", NULL };
+static char *gDummyPasswdList[2] = {"__macvnc_block_unencrypted__", NULL};
 static rfbBool gOwnPasswdList = FALSE;
 
 /*
@@ -77,8 +77,7 @@ findLibVncLocalSymbol(const char *symname)
             if (lc->cmd == LC_SYMTAB)
                 symtab = (const struct symtab_command *)lc;
             if (lc->cmd == LC_SEGMENT_64) {
-                const struct segment_command_64 *sg =
-                    (const struct segment_command_64 *)lc;
+                const struct segment_command_64 *sg = (const struct segment_command_64 *)lc;
                 if (strcmp(sg->segname, "__LINKEDIT") == 0)
                     linkedit = sg;
             }
@@ -90,8 +89,7 @@ findLibVncLocalSymbol(const char *symname)
         {
             const uint8_t *linkeditBase =
                 (const uint8_t *)(linkedit->vmaddr + slide - linkedit->fileoff);
-            const struct nlist_64 *syms =
-                (const struct nlist_64 *)(linkeditBase + symtab->symoff);
+            const struct nlist_64 *syms = (const struct nlist_64 *)(linkeditBase + symtab->symoff);
             const char *strs = (const char *)(linkeditBase + symtab->stroff);
             uint32_t s;
 
@@ -118,8 +116,8 @@ neuterStockSecurityHandler(const char *symname)
                symname);
         return;
     }
-    rfbLog("vencrypt: disabling stock security type %u (%s) for encrypted mode\n",
-           handler->type, symname);
+    rfbLog("vencrypt: disabling stock security type %u (%s) for encrypted mode\n", handler->type,
+           symname);
     handler->type = MACVNC_DISABLED_SEC_TYPE;
 }
 
@@ -182,8 +180,7 @@ sslAcceptWithWait(SSL *ssl, int fd, int timeoutSec)
 
         int err = SSL_get_error(ssl, r);
         if (err != SSL_ERROR_WANT_READ && err != SSL_ERROR_WANT_WRITE) {
-            rfbErr("vencrypt: SSL_accept failed (ssl_error=%d errno=%d)\n",
-                   err, errno);
+            rfbErr("vencrypt: SSL_accept failed (ssl_error=%d errno=%d)\n", err, errno);
             logSslErrors("SSL_accept");
             if (err == SSL_ERROR_SSL) {
                 rfbErr("vencrypt: tip: TigerVNC must trust this cert — accept the "
@@ -205,10 +202,8 @@ sslAcceptWithWait(SSL *ssl, int fd, int timeoutSec)
         struct timeval tv;
         tv.tv_sec = 1;
         tv.tv_usec = 0;
-        r = select(fd + 1,
-                   err == SSL_ERROR_WANT_READ ? &fds : NULL,
-                   err == SSL_ERROR_WANT_WRITE ? &fds : NULL,
-                   NULL, &tv);
+        r = select(fd + 1, err == SSL_ERROR_WANT_READ ? &fds : NULL,
+                   err == SSL_ERROR_WANT_WRITE ? &fds : NULL, NULL, &tv);
         if (r < 0 && errno != EINTR) {
             rfbErr("vencrypt: select failed: %s\n", strerror(errno));
             return -1;
@@ -299,22 +294,21 @@ tlsAcceptAnonGnuTLS(rfbClientPtr cl)
         goto fail;
     if ((ret = gnutls_anon_allocate_server_credentials(&anon_cred)) != GNUTLS_E_SUCCESS)
         goto fail;
-    if ((ret = gnutls_credentials_set(ctx->session, GNUTLS_CRD_ANON, anon_cred)) != GNUTLS_E_SUCCESS)
+    if ((ret = gnutls_credentials_set(ctx->session, GNUTLS_CRD_ANON, anon_cred)) !=
+        GNUTLS_E_SUCCESS)
         goto fail;
-    if ((ret = gnutls_priority_set_direct(
-             ctx->session, "NORMAL:+ANON-ECDH:+ANON-DH", NULL)) != GNUTLS_E_SUCCESS)
+    if ((ret = gnutls_priority_set_direct(ctx->session, "NORMAL:+ANON-ECDH:+ANON-DH", NULL)) !=
+        GNUTLS_E_SUCCESS)
         goto fail;
 
-    gnutls_transport_set_ptr(ctx->session,
-                             (gnutls_transport_ptr_t)(uintptr_t)cl->sock);
+    gnutls_transport_set_ptr(ctx->session, (gnutls_transport_ptr_t)(uintptr_t)cl->sock);
 
     do {
         ret = gnutls_handshake(ctx->session);
     } while (ret == GNUTLS_E_AGAIN || ret == GNUTLS_E_INTERRUPTED);
 
     if (ret != GNUTLS_E_SUCCESS) {
-        rfbErr("vencrypt: GnuTLS anon handshake failed: %s\n",
-               gnutls_strerror(ret));
+        rfbErr("vencrypt: GnuTLS anon handshake failed: %s\n", gnutls_strerror(ret));
         goto fail;
     }
 
@@ -373,20 +367,6 @@ tlsAcceptX509(rfbClientPtr cl)
     return 0;
 }
 
-const char *
-macvncSecurityModeName(MacVNCSecurityMode mode)
-{
-    switch (mode) {
-    case MACVNC_SECURITY_VENCRYPT_X509:
-        return "VeNCrypt+X.509 (encrypted, default)";
-    case MACVNC_SECURITY_ANONTLS:
-        return "AnonTLS (encrypted, server identity NOT authenticated)";
-    case MACVNC_SECURITY_PLAIN:
-        return "plain VNC (UNENCRYPTED — compatibility only)";
-    }
-    return "unknown";
-}
-
 static rfbBool
 macvncPasswordCheck(rfbClientPtr cl, const char *response, int len)
 {
@@ -404,8 +384,7 @@ sendAuthOkAndInit(rfbClientPtr cl)
 {
     uint32_t authResult;
 
-    if (cl->protocolMajorVersion == 3 &&
-        cl->protocolMinorVersion > 7 &&
+    if (cl->protocolMajorVersion == 3 && cl->protocolMinorVersion > 7 &&
         cl->protocolMinorVersion != 889) {
         authResult = Swap32IfLE(rfbVncAuthOK);
         if (rfbWriteExact(cl, (char *)&authResult, 4) < 0) {
@@ -415,9 +394,7 @@ sendAuthOkAndInit(rfbClientPtr cl)
         }
     }
 
-    cl->state = (cl->protocolMinorVersion == 889)
-                    ? RFB_INITIALISATION_SHARED
-                    : RFB_INITIALISATION;
+    cl->state = (cl->protocolMinorVersion == 889) ? RFB_INITIALISATION_SHARED : RFB_INITIALISATION;
     if (cl->state == RFB_INITIALISATION_SHARED)
         rfbProcessClientMessage(cl);
 }
@@ -437,7 +414,7 @@ sendVncAuthChallenge(rfbClientPtr cl)
 static void
 handleVeNCrypt(rfbClientPtr cl)
 {
-    uint8_t serverVersion[2] = { 0, 2 };
+    uint8_t serverVersion[2] = {0, 2};
     uint8_t clientVersion[2];
     uint8_t reply;
     uint8_t count;
@@ -464,8 +441,7 @@ handleVeNCrypt(rfbClientPtr cl)
     if (clientVersion[0] != 0 || clientVersion[1] < 2) {
         reply = 0xFF;
         rfbWriteExact(cl, (char *)&reply, 1);
-        rfbLog("vencrypt: client version %d.%d unsupported\n",
-               clientVersion[0], clientVersion[1]);
+        rfbLog("vencrypt: client version %d.%d unsupported\n", clientVersion[0], clientVersion[1]);
         rfbCloseClient(cl);
         return;
     }
@@ -563,11 +539,7 @@ handleVeNCrypt(rfbClientPtr cl)
     }
 }
 
-static rfbSecurityHandler veNCryptHandler = {
-    rfbVeNCrypt,
-    handleVeNCrypt,
-    NULL
-};
+static rfbSecurityHandler veNCryptHandler = {rfbVeNCrypt, handleVeNCrypt, NULL};
 
 rfbBool
 macvncSecuritySetup(rfbScreenInfoPtr screen, MacVNCSecurityMode mode)
@@ -602,8 +574,7 @@ macvncSecuritySetup(rfbScreenInfoPtr screen, MacVNCSecurityMode mode)
     disableStockUnencryptedTypes();
 
     if (mode == MACVNC_SECURITY_VENCRYPT_X509) {
-        if (!macvncCertGetPaths(certPath, sizeof(certPath),
-                                keyPath, sizeof(keyPath)))
+        if (!macvncCertGetPaths(certPath, sizeof(certPath), keyPath, sizeof(keyPath)))
             return FALSE;
         screen->sslcertfile = strdup(certPath);
         screen->sslkeyfile = strdup(keyPath);
