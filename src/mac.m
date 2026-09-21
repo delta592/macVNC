@@ -36,13 +36,18 @@
 #include <stdio.h>
 #include <pthread.h>
 #include <stdlib.h>
+#include <string.h>
 
 #import "ScreenCapturer.h"
+#include "cert_manager.h"
+#include "vencrypt.h"
 
 /* The main LibVNCServer screen object */
 rfbScreenInfoPtr rfbScreen;
 /* Operation modes set by CLI options */
 rfbBool viewOnly = FALSE;
+MacVNCSecurityMode securityMode = MACVNC_SECURITY_VENCRYPT_X509;
+rfbBool regenCert = FALSE;
 
 /* Two framebuffers. */
 void *frameBufferOne;
@@ -622,6 +627,18 @@ ScreenInit(int argc, char**argv)
       }];
   [capturer startCapture];
 
+  if (securityMode == MACVNC_SECURITY_VENCRYPT_X509) {
+      if (!macvncCertEnsure(regenCert)) {
+          rfbErr("Could not set up TLS certificate.\n");
+          return FALSE;
+      }
+  }
+
+  if (!macvncSecuritySetup(rfbScreen, securityMode)) {
+      rfbErr("Could not configure security.\n");
+      return FALSE;
+  }
+
   rfbInitServer(rfbScreen);
 
   return TRUE;
@@ -650,9 +667,32 @@ int main(int argc,char *argv[])
       viewOnly=TRUE;
     } else if(strcmp(argv[i],"-display")==0) {
 	displayNumber = atoi(argv[i+1]);
+    } else if(strcmp(argv[i],"-security")==0 || strcmp(argv[i],"--security")==0) {
+        if(i+1 >= argc) {
+            fprintf(stderr, "-security requires vencrypt|anontls|plain\n");
+            exit(EXIT_FAILURE);
+        }
+        if(strcmp(argv[i+1],"vencrypt")==0)
+            securityMode = MACVNC_SECURITY_VENCRYPT_X509;
+        else if(strcmp(argv[i+1],"anontls")==0)
+            securityMode = MACVNC_SECURITY_ANONTLS;
+        else if(strcmp(argv[i+1],"plain")==0)
+            securityMode = MACVNC_SECURITY_PLAIN;
+        else {
+            fprintf(stderr, "Unknown security mode '%s' (use vencrypt|anontls|plain)\n", argv[i+1]);
+            exit(EXIT_FAILURE);
+        }
+    } else if(strcmp(argv[i],"-regen-cert")==0 || strcmp(argv[i],"--regen-cert")==0) {
+        regenCert = TRUE;
     } else if(strcmp(argv[i],"-h") == 0 || strcmp(argv[i],"--help") == 0)  {
-        fprintf(stderr, "-viewonly              Do not allow any input\n");
-        fprintf(stderr, "-display <index>       Only export specified display\n");
+        fprintf(stderr, "-viewonly                    Do not allow any input\n");
+        fprintf(stderr, "-display <index>             Only export specified display\n");
+        fprintf(stderr, "-security vencrypt|anontls|plain\n");
+        fprintf(stderr, "                             Traffic encryption mode (default: vencrypt)\n");
+        fprintf(stderr, "                             vencrypt = VeNCrypt + X.509 cert (recommended)\n");
+        fprintf(stderr, "                             anontls  = VeNCrypt AnonTLS (no cert)\n");
+        fprintf(stderr, "                             plain    = UNENCRYPTED legacy VNC auth\n");
+        fprintf(stderr, "-regen-cert                  Regenerate the self-signed TLS certificate\n");
         rfbUsage();
         exit(EXIT_SUCCESS);
     }

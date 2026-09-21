@@ -6,15 +6,16 @@ jobs:
   build:
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install Build Dependencies
         run: |
-          brew install libvncserver
+          brew install libvncserver openssl
       - name: Build
         run: |
           mkdir build
           cd build
-          cmake ..
+          # CI runners have single-arch Homebrew bottles
+          cmake .. -DMACVNC_UNIVERSAL=OFF
           cmake --build .
           cmake --install .
       # - name: Archive App Bundle

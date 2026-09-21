@@ -14,39 +14,178 @@ GPL dump by AT&T Cambridge.
 * Double-buffering for framebuffer updates.
 * Mouse and keyboard input.
 * Multi-monitor support.
+* **VeNCrypt / TLS encryption** (default) — no SSH tunnel required. Works with
+  encryption-capable viewers such as TigerVNC Viewer.
+* **Universal binary** (arm64 + x86_64) when built with fat/universal dependencies.
+
+## Supported environments
+
+| | Older Intel host | Modern Apple Silicon host |
+|--|--|--|
+| macOS | 15.x | 26+/27+ (and generally 15+) |
+| Package manager | **MacPorts** (`/opt/local`) | **Homebrew** (`/opt/homebrew`) |
+| CPU | x86_64 | arm64 |
+| LibVNCServer TLS | GnuTLS (MacPorts default) | OpenSSL (Homebrew bottle) |
+
+Minimum deployment target is **macOS 15.0**. ScreenCaptureKit is required.
 
 # Building
 
-You'll need LibVNCServer for building macVNC; the easiest way of installing this is via a package manager:
-If using Homebrew, you can install via `brew install libvncserver`; if using MacPorts, use `sudo port
-install LibVNCServer`.
+## Dependencies
 
-macVNC uses CMake, thus after installing build dependencies it's:
+You need **LibVNCServer with TLS** (OpenSSL *or* GnuTLS) plus **OpenSSL** for
+certificate generation, and CMake.
 
-    mkdir build
-    cd build
-    cmake ..
-    cmake --build .
-    cmake --install .
+### MacPorts (Intel / universal builds)
+
+```bash
+sudo port install cmake openssl LibVNCServer tigervnc
+# For a single universal .app (recommended on Apple Silicon with MacPorts):
+sudo port install cmake +universal openssl +universal LibVNCServer +universal
+```
+
+MacPorts `LibVNCServer` uses **GnuTLS** (`WITH_OPENSSL=OFF`). That is supported.
+
+### Homebrew (Apple Silicon native)
+
+```bash
+brew install cmake openssl libvncserver
+# Viewer (optional): brew install --cask tigervnc-viewer
+```
+
+Homebrew `libvncserver` uses **OpenSSL**. Confirm:
+
+```bash
+grep LIBVNCSERVER_HAVE_LIBSSL "$(brew --prefix libvncserver)/include/rfb/rfbconfig.h"
+# expect: #define LIBVNCSERVER_HAVE_LIBSSL 1
+```
+
+## Configure & build
+
+CMake searches `/opt/local` (MacPorts), `/opt/homebrew`, and `/usr/local`.
+
+### Universal app (arm64 + x86_64) — default when deps are fat
+
+Requires **fat/universal** LibVNCServer and OpenSSL. Prefer building with
+**MacPorts `+universal`** (on Apple Silicon or a machine that can produce both
+slices). Homebrew bottles are usually single-arch; CMake will warn and fall
+back to native.
+
+A binary that must **run on macOS 15 Intel** should be built against MacPorts
+libraries on a macOS 15 (or compatible) SDK — not against Homebrew bottles
+built for macOS 26/27.
+
+```bash
+cmake -S . -B build \
+  -DCMAKE_PREFIX_PATH=/opt/local \
+  -DMACVNC_UNIVERSAL=ON \
+  -DCMAKE_OSX_DEPLOYMENT_TARGET=15.0
+cmake --build build
+# or: ./scripts/build-universal.sh
+lipo -info build/macVNC.app/Contents/MacOS/macVNC
+# expect: Architectures in the fat file: ... x86_64 arm64
+```
+
+### Native-only (when deps are single-arch, e.g. Homebrew arm64)
+
+```bash
+cmake -S . -B build -DMACVNC_UNIVERSAL=OFF
+cmake --build build
+```
+
+### Lipo two machine-local builds
+
+If you build arm64 on Apple Silicon (Homebrew) and x86_64 on Intel (MacPorts):
+
+```bash
+# on each machine:
+cmake -S . -B build -DMACVNC_UNIVERSAL=OFF && cmake --build build
+# copy both binaries together, then:
+lipo -create -output macVNC.universal \
+  macVNC.arm64 macVNC.x86_64
+```
+
+You must also ship matching-arch (or fat) copies of linked dylibs, or use
+`cmake --install` / `fixup_bundle` per slice. Prefer MacPorts `+universal` when
+you want one self-contained universal `.app`.
 
 # Running
 
-As you might have Apple's Remote Desktop Server already running (which occupies port 5900),
-you can run macVNC via
+```bash
+./build/macVNC.app/Contents/MacOS/macVNC -rfbport 5901 -passwd 'secret'
+```
 
-    ./macVNC.app/Contents/MacOS/macVNC -rfbport 5901
+If Apple's Remote Desktop already owns port 5900, pick another port as above.
 
-In its default setup, macVNC does mouse and keyboard input. For this, it needs certain system permissions.
-It tells you on first run if these are missing; you can set up permissions via 'System Preferences'->'Security & Privacy'->'Privacy'->'Accessibility'.
-Note that if launched from Terminal, the entry shown will be 'Terminal', not 'macVNC'.
+## Encryption (default)
 
-Note that setting a password is mandatory in case you want to access the server using MacOS's built-in Screen Sharing app.
-You can do so via the `-passwd` commandline argument.
+By default the server uses **VeNCrypt with an X.509 certificate**. On first run it
+auto-generates a self-signed cert/key under:
+
+```text
+~/.macvnc/cert.pem
+~/.macvnc/key.pem
+```
+
+(The private key is mode `0600`. Paths avoid spaces so TigerVNC’s `-X509CA` works.)
+
+| Flag | Meaning |
+|------|---------|
+| `-security vencrypt` | VeNCrypt + X.509 (default) |
+| `-security anontls` | VeNCrypt AnonTLS (encrypted; server identity not authenticated) |
+| `-security plain` | Legacy unencrypted VNC auth (compatibility / testing only) |
+| `-regen-cert` | Force-regenerate the self-signed certificate |
+
+### TigerVNC Viewer
+
+**Homebrew cask (newer):**
+
+```bash
+/Applications/TigerVNC.app/Contents/MacOS/vncviewer \
+  -X509CA "$HOME/.macvnc/cert.pem" host::5901
+```
+
+**MacPorts (often 1.14.x):**
+
+```bash
+/opt/local/bin/vncviewer -X509CA "$HOME/.macvnc/cert.pem" host::5901
+# If an older viewer picks plain VncAuth, force:
+/opt/local/bin/vncviewer -SecurityTypes=X509Vnc -X509CA "$HOME/.macvnc/cert.pem" host::5901
+```
+
+`/opt/local/bin/vncviewer` is a wrapper around
+`/Applications/MacPorts/TigerVNC Viewer.app`. That app is **unsigned**; on
+macOS 15+ Sequoia, Local Network privacy can reject it with **No route to
+host** when launched from the console (SSH/`nc` may still work). Ad-hoc sign
+once, then allow Local Network when prompted:
+
+```bash
+sudo codesign --force --deep --sign - "/Applications/MacPorts/TigerVNC Viewer.app"
+open -a "/Applications/MacPorts/TigerVNC Viewer.app" --args host::5901
+```
+
+Confirm **TigerVNC Viewer** is enabled under System Settings → Privacy &
+Security → Local Network. Re-run `codesign` after a MacPorts `tigervnc`
+upgrade if the symptom returns.
+
+(Recent macVNC builds hide stock VncAuth in encrypted mode so MacPorts 1.14
+should prefer VeNCrypt without the extra flag.)
+
+Apple Screen Sharing does **not** speak VeNCrypt.
+
+## Permissions
+
+Grant these under System Settings → Privacy & Security:
+
+* **Accessibility** — keyboard/mouse injection
+* **Screen Recording** — ScreenCaptureKit capture
+* **Local Network** — required for viewers (and often Terminal/iTerm) to
+  reach LAN hosts on macOS 15+; missing permission often surfaces as
+  **No route to host**
+
+If launched from Terminal/iTerm, some TCC entries may show as **Terminal** /
+**iTerm**, not macVNC.
 
 # License
 
 As its predecessors, macVNC is licensed under the GPL version 2. See [COPYING](COPYING) for more information.
-
-
-
-
