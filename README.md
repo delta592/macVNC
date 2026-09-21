@@ -109,6 +109,23 @@ You must also ship matching-arch (or fat) copies of linked dylibs, or use
 `cmake --install` / `fixup_bundle` per slice. Prefer MacPorts `+universal` when
 you want one self-contained universal `.app`.
 
+### Make / Ninja / ccache
+
+A thin `Makefile` wraps CMake:
+
+```bash
+make                              # configure + build (Unix Makefiles)
+make GENERATOR=Ninja              # faster incremental builds
+make UNIVERSAL=OFF                # native arch (Homebrew)
+make test                         # CTest unit tests
+make COVERAGE=ON coverage         # LLVM coverage + lcov/HTML under build/
+make format-check                 # clang-format on maintained sources
+make tidy                         # clang-tidy via compile_commands.json
+```
+
+`ccache` is used automatically when present (`brew install ccache`). Disable with
+`-DMACVNC_USE_CCACHE=OFF`.
+
 # Running
 
 ```bash
@@ -185,6 +202,55 @@ Grant these under System Settings → Privacy & Security:
 
 If launched from Terminal/iTerm, some TCC entries may show as **Terminal** /
 **iTerm**, not macVNC.
+
+# Development
+
+## Tests
+
+CTest covers cert path/generation and security mode names:
+
+```bash
+make UNIVERSAL=OFF test
+# or: ctest --test-dir build --output-on-failure
+```
+
+Optional XCTest bundle (same cases) when generating an Xcode project:
+
+```bash
+cmake -S . -B build-xcode -G Xcode -DMACVNC_BUILD_XCTEST=ON -DMACVNC_UNIVERSAL=OFF
+cmake --build build-xcode
+```
+
+OCMock is reserved for future ScreenCapturer isolation tests (`brew install
+ocmock` when adding those).
+
+## Coverage
+
+```bash
+make COVERAGE=ON coverage
+# → build/coverage.lcov and build/coverage-html/
+```
+
+CI uploads `coverage.lcov` as an artifact. Set a `CODECOV_TOKEN` repo secret to
+enable Codecov uploads.
+
+## LaunchAgent (launchd)
+
+Background the server as a per-user agent:
+
+```bash
+make UNIVERSAL=OFF build
+MACVNC_PASSWD='secret' make launchd-load    # port 5901, VeNCrypt by default
+make launchd-status
+make launchd-unload
+```
+
+Template: `contrib/launchd/net.macvnc.server.plist` (rendered by
+`scripts/launchd.sh`). Override with `MACVNC_PROGRAM`, `MACVNC_RFBPORT`,
+`MACVNC_SECURITY`, `MACVNC_PASSWD`.
+
+Grant Accessibility / Screen Recording / Local Network to the binary (or to
+`launchd`’s host context) before expecting input and capture to work.
 
 # License
 
