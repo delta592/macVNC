@@ -13,7 +13,7 @@ rfbBool macvncCertGetPaths(char *certPath, size_t certPathSize, char *keyPath, s
 /**
  * Ensure a self-signed cert/key pair exists.
  * If forceRegen is true, always create a new pair.
- * Private key is written mode 0600.
+ * Private key is created mode 0600; certificate mode 0644 (via open+fchmod).
  */
 rfbBool macvncCertEnsure(rfbBool forceRegen);
 

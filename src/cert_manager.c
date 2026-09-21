@@ -1,6 +1,7 @@
 #include "cert_manager.h"
 
 #include <errno.h>
+#include <fcntl.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
@@ -11,6 +12,30 @@
 #include <openssl/x509.h>
 #include <openssl/x509v3.h>
 
+/**
+ * Create/truncate path with an explicit mode (avoids fopen's 0666 & umask
+ * race, and path-based chmod TOCTOU). Mode is applied via open + fchmod.
+ */
+static FILE *
+openWriteWithMode(const char *path, mode_t mode)
+{
+    int fd;
+    FILE *fp;
+
+    fd = open(path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, mode);
+    if (fd < 0)
+        return NULL;
+    if (fchmod(fd, mode) != 0) {
+        close(fd);
+        return NULL;
+    }
+    fp = fdopen(fd, "w");
+    if (!fp) {
+        close(fd);
+        return NULL;
+    }
+    return fp;
+}
 static rfbBool
 mkdirRecursive(const char *dir, mode_t mode)
 {
@@ -173,7 +198,7 @@ writeSelfSignedCert(const char *certPath, const char *keyPath)
         goto done;
     }
 
-    keyFile = fopen(keyPath, "w");
+    keyFile = openWriteWithMode(keyPath, 0600);
     if (!keyFile) {
         rfbErr("cert: cannot write %s: %s\n", keyPath, strerror(errno));
         goto done;
@@ -184,9 +209,9 @@ writeSelfSignedCert(const char *certPath, const char *keyPath)
     }
     fclose(keyFile);
     keyFile = NULL;
-    chmod(keyPath, 0600);
 
-    certFile = fopen(certPath, "w");
+    /* Cert is not secret; 0644 is fine. Avoid world-writable fopen defaults. */
+    certFile = openWriteWithMode(certPath, 0644);
     if (!certFile) {
         rfbErr("cert: cannot write %s: %s\n", certPath, strerror(errno));
         goto done;
@@ -197,7 +222,7 @@ writeSelfSignedCert(const char *certPath, const char *keyPath)
     }
 
     ok = TRUE;
-    rfbLog("cert: wrote self-signed certificate to %s (CN=%s)\n", certPath, cn);
+    rfbLog("cert: wrote self-signed certificate to %s (CN=%s, mode 0644)\n", certPath, cn);
     rfbLog("cert: wrote private key to %s (mode 0600)\n", keyPath);
 
 done:
