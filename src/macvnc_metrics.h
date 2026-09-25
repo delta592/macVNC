@@ -20,10 +20,10 @@ typedef struct {
     uint64_t dirtyTiles;
     uint64_t dirtyPixels;
     uint64_t bytesCopied;
-    uint64_t captureWaitNs;     /* time capture spent waiting on handoff mutex */
-    uint64_t publishWaitNs;     /* time publisher spent waiting for sendMutex */
+    uint64_t captureWaitNs; /* time capture spent waiting on handoff mutex */
+    uint64_t publishWaitNs; /* time publisher spent waiting for sendMutex */
     uint64_t copyDiffNs;
-    uint64_t lastFrameAgeNs;    /* capture→publish age of last published frame */
+    uint64_t lastFrameAgeNs; /* capture→publish age of last published frame */
     uint64_t maxFrameAgeNs;
     uint64_t pendingPeak;
 } MacVNCMetricsSnapshot;

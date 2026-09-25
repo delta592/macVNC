@@ -263,6 +263,29 @@ if(MACVNC_BUILD_TESTS)
   add_test(NAME frame_pipeline COMMAND test_frame_pipeline)
   set_tests_properties(frame_pipeline PROPERTIES
     ENVIRONMENT "LLVM_PROFILE_FILE=${CMAKE_BINARY_DIR}/test_frame_pipeline-%p.profraw")
+
+  add_executable(test_macvnc_metrics
+    tests/test_macvnc_metrics.c
+    src/macvnc_metrics.c
+  )
+  target_include_directories(test_macvnc_metrics PRIVATE src tests)
+  target_link_libraries(test_macvnc_metrics LibVNCServer::vncserver ${ZLIB_LIBRARY})
+  add_test(NAME macvnc_metrics COMMAND test_macvnc_metrics)
+  set_tests_properties(macvnc_metrics PROPERTIES
+    ENVIRONMENT "LLVM_PROFILE_FILE=${CMAKE_BINARY_DIR}/test_macvnc_metrics-%p.profraw")
+
+  add_executable(test_cursor_map
+    tests/test_cursor_map.m
+    src/cursor_tracker.m
+    src/macvnc_metrics.c
+  )
+  target_include_directories(test_cursor_map PRIVATE src tests)
+  target_link_libraries(test_cursor_map
+    LibVNCServer::vncserver ${ZLIB_LIBRARY} ${CMAKE_THREAD_LIBS_INIT}
+    ${APPKIT_LIBRARY} ${FOUNDATION} ${CARBON_LIBRARY})
+  add_test(NAME cursor_map COMMAND test_cursor_map)
+  set_tests_properties(cursor_map PROPERTIES
+    ENVIRONMENT "LLVM_PROFILE_FILE=${CMAKE_BINARY_DIR}/test_cursor_map-%p.profraw")
 endif()
 
 if(MACVNC_BUILD_XCTEST)
@@ -273,10 +296,14 @@ if(MACVNC_BUILD_XCTEST)
   xctest_add_bundle(MacVNCTests ${PROJECT_NAME}
     tests/MacVNCTests.m
     src/cert_manager.c
+    src/frame_pipeline.c
+    src/macvnc_metrics.c
+    src/cursor_tracker.m
   )
   target_include_directories(MacVNCTests PRIVATE src)
   target_link_libraries(MacVNCTests
-    LibVNCServer::vncserver OpenSSL::SSL OpenSSL::Crypto ${ZLIB_LIBRARY})
+    LibVNCServer::vncserver OpenSSL::SSL OpenSSL::Crypto ${ZLIB_LIBRARY}
+    ${CMAKE_THREAD_LIBS_INIT} ${APPKIT_LIBRARY} ${FOUNDATION} ${CARBON_LIBRARY})
   xctest_add_test(XCTest.MacVNC MacVNCTests)
 endif()
 

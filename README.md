@@ -237,13 +237,19 @@ If launched from Terminal/iTerm, some TCC entries may show as **Terminal** /
 
 ## Tests
 
-CTest covers cert path/generation, security mode names, and frame-pipeline
-tile diff/coalesce:
+CTest covers cert path/generation, security mode names, frame-pipeline tile
+diff/coalesce, publisher start/stop with full and partial damage, metrics
+counters, and cursor coordinate mapping plus shape/position poll lifecycle:
 
 ```bash
 make UNIVERSAL=OFF test
 # or: ctest --test-dir build --output-on-failure
 ```
+
+Coverage (`make COVERAGE=ON coverage`) merges profiles from all CTest binaries
+(`test_cert_manager`, `test_security_mode`, `test_frame_pipeline`,
+`test_macvnc_metrics`, `test_cursor_map`). ScreenCaptureKit stream I/O and the
+live VeNCrypt handshake path remain integration/manual (host + TigerVNC).
 
 Optional XCTest bundle (same cases) when generating an Xcode project:
 

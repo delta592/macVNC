@@ -17,7 +17,7 @@ if [[ -z "${PROFRAW_LIST}" ]]; then
 fi
 
 BINARIES=""
-for t in test_cert_manager test_security_mode; do
+for t in test_cert_manager test_security_mode test_frame_pipeline test_macvnc_metrics test_cursor_map; do
   for candidate in "${BUILD}/${t}" "${BUILD}/tests/${t}"; do
     if [[ -x "${candidate}" ]]; then
       BINARIES="${BINARIES} ${candidate}"
@@ -29,6 +29,7 @@ if [[ -z "${BINARIES}" ]]; then
   echo "No test binaries found in ${BUILD}" >&2
   exit 1
 fi
+echo "Coverage objects:${BINARIES}"
 
 if xcrun --find llvm-cov >/dev/null 2>&1; then
   LLVM_COV=(xcrun llvm-cov)

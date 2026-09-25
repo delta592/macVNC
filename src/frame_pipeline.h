@@ -30,8 +30,8 @@ typedef struct {
     int width;
     int height;
     int bytesPerPixel;
-    int tileSize;       /* 32 or 64 recommended */
-    int maxRects;       /* coalesce bound; overflow → full frame */
+    int tileSize;           /* 32 or 64 recommended */
+    int maxRects;           /* coalesce bound; overflow → full frame */
     double damageFullRatio; /* if dirty fraction ≥ this, mark full frame */
 } MacVNCFramePipelineConfig;
 

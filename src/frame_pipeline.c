@@ -409,8 +409,7 @@ publishOne(MacVNCFramePipeline *p)
             return;
         }
 
-        double ratio =
-            (double)dirtyTiles / ((double)p->tilesX * (double)p->tilesY);
+        double ratio = (double)dirtyTiles / ((double)p->tilesX * (double)p->tilesY);
         int coalesced = macvncPipelineCoalesceTiles(p->tileMap, p->tilesX, p->tilesY, p->tileSize,
                                                     p->width, p->height, rects, p->maxRects);
         if (coalesced < 0 || ratio >= p->damageFullRatio) {
@@ -454,8 +453,7 @@ publishOne(MacVNCFramePipeline *p)
                     if (y0 + th > p->height)
                         th = p->height - y0;
                     for (int y = 0; y < th; y++) {
-                        memcpy((uint8_t *)p->backBuffer +
-                                   (size_t)(y0 + y) * (size_t)p->stride +
+                        memcpy((uint8_t *)p->backBuffer + (size_t)(y0 + y) * (size_t)p->stride +
                                    (size_t)x0 * (size_t)p->bpp,
                                front + (size_t)(y0 + y) * (size_t)p->stride +
                                    (size_t)x0 * (size_t)p->bpp,
