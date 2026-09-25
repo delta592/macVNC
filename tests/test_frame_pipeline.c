@@ -21,12 +21,12 @@ test_diff_and_coalesce(void)
 
     MACVNC_CHECK(prev && next && tileMap);
 
-    /* Identical frames → no dirty tiles. */
+    /* Identical frames -> no dirty tiles. */
     dirty = macvncPipelineDiffTiles(prev, next, w, h, bpp, stride, tile, tileMap, tilesX, tilesY,
                                     NULL, 0);
     MACVNC_CHECK(dirty == 0);
 
-    /* Change a 8×8 block inside one tile. */
+    /* Change a 8x8 block inside one tile. */
     memset(next + 4 * stride + 8 * bpp, 0x7f, 8 * bpp);
     dirty = macvncPipelineDiffTiles(prev, next, w, h, bpp, stride, tile, tileMap, tilesX, tilesY,
                                     NULL, 0);
@@ -43,7 +43,7 @@ test_diff_and_coalesce(void)
     {
         MacVNCRect clip = {.x = 0, .y = 0, .w = 16, .h = 16};
         memset(tileMap, 0, (size_t)tilesX * (size_t)tilesY);
-        /* Change far away — outside clip — should report 0 when clipped. */
+        /* Change far away - outside clip - should report 0 when clipped. */
         memset(next, 0, (size_t)stride * (size_t)h);
         memset(next + 40 * stride + 100 * bpp, 0xaa, 4);
         dirty = macvncPipelineDiffTiles(prev, next, w, h, bpp, stride, tile, tileMap, tilesX,
@@ -115,7 +115,7 @@ test_coalesce_grows_vertically(void)
     int n;
 
     memset(tileMap, 0, sizeof(tileMap));
-    /* 2×2 block of dirty tiles. */
+    /* 2x2 block of dirty tiles. */
     tileMap[0] = 1;
     tileMap[1] = 1;
     tileMap[3] = 1;
@@ -146,7 +146,7 @@ test_coalesce_overflow(void)
     tileMap[15] = 1;
 
     n = macvncPipelineCoalesceTiles(tileMap, tilesX, tilesY, tile, 128, 128, rects, 2);
-    MACVNC_CHECK(n < 0); /* overflow → caller should full-frame */
+    MACVNC_CHECK(n < 0); /* overflow -> caller should full-frame */
 }
 
 static void
@@ -212,7 +212,9 @@ test_pipeline_create_submit_destroy(void)
     hints[0].w = 16;
     hints[0].h = 16;
     MACVNC_CHECK(macvncPipelineSubmitFrame(p, src, (size_t)w * 4, w, h, hints, 1, 1234));
-    memset(src, 0x22, sizeof(src));
+    /* Distinct payload for the superseded frame (avoid memset dead-store alert). */
+    for (size_t i = 0; i < sizeof(src); i++)
+        src[i] = 0x22;
     MACVNC_CHECK(macvncPipelineSubmitFrame(p, src, (size_t)w * 4, w, h, hints, 1, 5678));
 
     /* Stride larger than packed row still copies correctly into pending. */
@@ -296,18 +298,18 @@ test_pipeline_publisher_full_then_partial(void)
     MACVNC_CHECK(snap.framesPublished >= 1);
     MACVNC_CHECK(snap.fullFramePublishes >= 1);
 
-    /* Identical frame → publish notes zero dirty (early return). */
+    /* Identical frame -> publish notes zero dirty (early return). */
     MACVNC_CHECK(macvncPipelineSubmitFrame(p, src, (size_t)w * 4, w, h, NULL, 0, macvncNowNs()));
     usleep(50000);
 
-    /* Small dirty region → partial publish path. */
+    /* Small dirty region -> partial publish path. */
     src[8] = 0xff;
     MACVNC_CHECK(macvncPipelineSubmitFrame(p, src, (size_t)w * 4, w, h, NULL, 0, macvncNowNs()));
     waitForPublished(snap.framesPublished + 1, 1000);
     macvncMetricsSnapshot(&snap);
     MACVNC_CHECK(snap.framesPublished >= 2);
 
-    /* High dirty ratio → full-frame path after first publish. */
+    /* High dirty ratio -> full-frame path after first publish. */
     memset(src, 0xaa, (size_t)w * (size_t)h * 4);
     MACVNC_CHECK(macvncPipelineSubmitFrame(p, src, (size_t)w * 4, w, h, NULL, 0, macvncNowNs()));
     waitForPublished(snap.framesPublished + 1, 1000);
@@ -351,7 +353,7 @@ test_pipeline_damage_full_ratio_and_hints(void)
     cfg.height = h;
     cfg.bytesPerPixel = 4;
     cfg.tileSize = 32;
-    cfg.maxRects = 1; /* force coalesce overflow → full frame once dirty */
+    cfg.maxRects = 1; /* force coalesce overflow -> full frame once dirty */
     cfg.damageFullRatio = 0.01;
 
     p = macvncPipelineCreate(screen, a, b, &cfg);
@@ -364,7 +366,7 @@ test_pipeline_damage_full_ratio_and_hints(void)
     waitForPublished(1, 1000);
 
     macvncMetricsSnapshot(&before);
-    /* Two separated dirty tiles with maxRects=1 → coalesce overflow. */
+    /* Two separated dirty tiles with maxRects=1 -> coalesce overflow. */
     src[0] = 0xee;
     src[(size_t)(w * 4) * 40 + 40 * 4] = 0xee;
     hint.x = 0;
