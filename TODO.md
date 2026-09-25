@@ -40,7 +40,8 @@ and from `macvnc-fork-plan.md`.
 
 - [ ] Phase 5: TigerVNC e2e + packet-capture verification
 - [ ] Phase 5: Remmina (or second VeNCrypt client) check
-- [ ] Phase 6: Permission UX polish / packaging / signing
+- [ ] Phase 6: Permission UX polish / signing (pkg-in-dmg dist exists; ad-hoc only)
+- [x] Phase 6: Packaging — `make dist` writes a universal `.pkg` inside a `.dmg` (macOS 15 Intel + Apple Silicon)
 - [ ] Phase 6: Expand LaunchAgent beyond the contrib plist (login-item UX)
 - [ ] Phase 7: ScreenCaptureKit tuning / upstream PR
 - [ ] Tests: OCMock-based ScreenCapturer isolation tests

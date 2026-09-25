@@ -200,6 +200,9 @@ set(SOURCE_FILES
 # Build bundle
 #
 set(MACOSX_BUNDLE_COPYRIGHT "© 2024 Christian Beier (macvnc@christianbeier.net)")
+set(MACOSX_BUNDLE_GUI_IDENTIFIER "net.macvnc.app")
+set(MACOSX_BUNDLE_BUNDLE_NAME ${PROJECT_NAME})
+set(MACOSX_BUNDLE_BUNDLE_VERSION ${PROJECT_VERSION})
 set(MACOSX_BUNDLE_SHORT_VERSION_STRING ${PROJECT_VERSION})
 set(MACOSX_BUNDLE_ICON_FILE icon.icns)
 set_source_files_properties(src/icon.icns PROPERTIES MACOSX_PACKAGE_LOCATION Resources)
@@ -267,4 +270,4 @@ set(BU_CHMOD_BUNDLE_ITEMS ON)
 include(BundleUtilities)
 fixup_bundle(\"${APP}\"   \"\"   \"${DIRS}\")
    " COMPONENT Runtime)
-INSTALL(FILES README.md DESTINATION ${APP})
+INSTALL(FILES README.md DESTINATION ${APP}/Contents/Resources)

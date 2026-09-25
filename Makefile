@@ -8,6 +8,8 @@
 #   make UNIVERSAL=OFF   # native arch (deps + app)
 #   make test
 #   make coverage
+#   make dist                 # universal pkg inside dmg (macOS 15 Intel + ARM)
+#   make pkg
 #   make format
 #   make tidy
 #   make launchd-load
@@ -19,6 +21,11 @@ UNIVERSAL  ?= ON
 COVERAGE   ?= OFF
 JOBS       ?=
 DEPS_ARCH  ?=
+DIST_DIR   ?= dist
+DIST_BUILD_DIR ?= build-universal
+DIST_TAG   ?=
+DIST_RELEASE ?= 0
+DIST_FORCE ?= 0
 
 CMAKE_FLAGS := -DMACVNC_UNIVERSAL=$(UNIVERSAL) -DMACVNC_ENABLE_COVERAGE=$(COVERAGE)
 ifneq ($(PREFIX),)
@@ -58,6 +65,11 @@ help: ## List targets and current variable defaults
 	@printf "  %-18s %s\n" "PREFIX" "$(PREFIX)"
 	@printf "  %-18s %s\n" "DEPS_ARCH" "$(DEPS_ARCH)"
 	@printf "  %-18s %s\n" "JOBS" "$(JOBS)"
+	@printf "  %-18s %s\n" "DIST_DIR" "$(DIST_DIR)"
+	@printf "  %-18s %s\n" "DIST_BUILD_DIR" "$(DIST_BUILD_DIR)"
+	@printf "  %-18s %s\n" "DIST_TAG" "$(DIST_TAG)"
+	@printf "  %-18s %s\n" "DIST_RELEASE" "$(DIST_RELEASE)"
+	@printf "  %-18s %s\n" "DIST_FORCE" "$(DIST_FORCE)"
 
 .PHONY: deps
 deps: ## Build OpenSSL + LibVNCServer from source (see scripts/build-deps.sh)
@@ -115,6 +127,25 @@ universal: ## Build fat deps (if needed) and a universal .app
 .PHONY: install
 install: build ## Install / finalize the .app bundle
 	cmake --install $(BUILD_DIR)
+
+.PHONY: dist-app
+dist-app: ## Build/finalize a universal .app (from-source deps) into DIST_BUILD_DIR
+	./scripts/build-universal.sh $(DIST_BUILD_DIR)
+
+.PHONY: pkg
+pkg: dist-app ## Universal product .pkg (arm64+x86_64, macOS 15+)
+	DIST_DIR=$(DIST_DIR) DIST_REQUIRE_UNIVERSAL=1 DIST_FORMAT=pkg \
+	  DIST_SKIP_INSTALL=1 DIST_TAG=$(DIST_TAG) DIST_RELEASE=$(DIST_RELEASE) \
+	  DIST_FORCE=$(DIST_FORCE) ./scripts/dist.sh $(DIST_BUILD_DIR)
+
+.PHONY: dist
+dist: dist-app ## Universal .pkg inside a .dmg (macOS 15 Intel and Apple Silicon)
+	DIST_DIR=$(DIST_DIR) DIST_REQUIRE_UNIVERSAL=1 DIST_SKIP_INSTALL=1 \
+	  DIST_TAG=$(DIST_TAG) DIST_RELEASE=$(DIST_RELEASE) DIST_FORCE=$(DIST_FORCE) \
+	  ./scripts/dist.sh $(DIST_BUILD_DIR)
+
+.PHONY: dist-universal
+dist-universal: dist ## Alias for dist
 
 .PHONY: clean
 clean: ## Remove BUILD_DIR

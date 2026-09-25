@@ -96,11 +96,71 @@ make test                         # CTest unit tests
 make COVERAGE=ON coverage         # LLVM coverage + lcov/HTML under build/
 make format-check                 # clang-format on maintained sources
 make tidy                         # clang-tidy via compile_commands.json
+make dist                         # universal .pkg inside .dmg (Intel + Apple Silicon)
 ```
 
 `ccache` is **required** (configure fails if it is missing). Install with
 `brew install ccache` or see https://ccache.dev/download.html. Bypass only if
 needed with `-DMACVNC_USE_CCACHE=OFF`.
+
+## Distributing (universal pkg inside dmg)
+
+`make dist` builds a **universal** (`arm64` + `x86_64`) `.app` from the
+from-source deps prefix, finalizes the bundle, ad-hoc signs it, wraps it in a
+product `.pkg` that installs to `/Applications/macVNC.app`, and puts that
+package in a compressed `.dmg`.
+
+That single installer runs on:
+
+* **macOS 15.x Intel** (x86_64 slice)
+* **macOS 15.x+ Apple Silicon** (arm64 slice)
+
+```bash
+# Snapshot (sha + UTC timestamp); keeps prior artifacts in dist/
+make dist
+# → dist/macVNC-0.1.0-universal-<sha>-<YYYYMMDDTHHMMSSZ>.pkg
+# → dist/macVNC-0.1.0-universal-<sha>-<YYYYMMDDTHHMMSSZ>.dmg
+# → dist/macVNC-universal-latest.{pkg,dmg}  (symlinks to this build)
+
+# Production / release naming (tag):
+make dist DIST_TAG=v2.2.0
+# → dist/macVNC-v2.2.0-universal.{pkg,dmg}
+# Or check out a tag (clean tree) and run make dist — same naming.
+```
+
+Copy the `.dmg` to the other Mac, open it, run the `.pkg` (admin password),
+then grant **Screen Recording**, **Accessibility**, and **Local Network** to
+macVNC under System Settings → Privacy & Security.
+
+The disk image also includes **Uninstall macVNC.command**, which removes
+`/Applications/macVNC.app`, forgets the installer receipt, and unloads the
+optional LaunchAgent. It leaves `~/.macvnc` (certs) alone.
+
+Prior builds under `dist/` are kept. Snapshot names include git sha and a UTC
+timestamp so they never collide. Release names are stable; rebuild with
+`DIST_FORCE=1` only if you intentionally replace a release artifact.
+
+| Target | Output |
+|--------|--------|
+| `make dist` | universal `.pkg` + `.dmg` under `DIST_DIR` (default `dist/`) |
+| `make pkg` | universal product `.pkg` only |
+| `make dist-app` | universal `.app` in `DIST_BUILD_DIR` (default `build-universal/`) |
+| `make dist-universal` | alias for `make dist` |
+
+`make dist` **fails** if any Mach-O in the bundle is missing `arm64` or
+`x86_64`. The installer XML also sets `hostArchitectures` to `x86_64,arm64`
+and requires macOS 15.0.
+
+The package is **ad-hoc signed**, not notarized. On first open the other Mac
+may quarantine the disk image; right-click → Open, or:
+
+```bash
+xattr -d com.apple.quarantine ~/Downloads/macVNC-*.dmg
+```
+
+Other useful variables: `DIST_DIR`, `DIST_BUILD_DIR`, `DIST_TAG`,
+`DIST_RELEASE`, `DIST_FORCE`, `DIST_VERSION`, `DIST_INSTALL_LOCATION`,
+`DIST_IDENTITY` (pass a Developer ID if you have one).
 
 # Running
 

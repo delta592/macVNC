@@ -2,6 +2,7 @@
 /build
 /build-*/
 /deps/
+/dist/
 *~
 /.cache
 /.DS_Store
