@@ -124,6 +124,7 @@ find_library(SCREEN_CAPTURE_KIT ScreenCaptureKit REQUIRED)
 find_library(CORE_MEDIA CoreMedia)
 find_library(CORE_VIDEO CoreVideo)
 find_library(FOUNDATION Foundation)
+find_library(APPKIT_LIBRARY AppKit REQUIRED)
 find_library(ZLIB_LIBRARY z REQUIRED)
 find_library(SASL2_LIBRARY sasl2)
 
@@ -190,6 +191,12 @@ set(SOURCE_FILES
     src/ScreenCapturer.m
     src/cert_manager.h
     src/cert_manager.c
+    src/cursor_tracker.h
+    src/cursor_tracker.m
+    src/frame_pipeline.h
+    src/frame_pipeline.c
+    src/macvnc_metrics.h
+    src/macvnc_metrics.c
     src/vencrypt.h
     src/vencrypt.c
     src/mac.m
@@ -200,6 +207,9 @@ set(SOURCE_FILES
 # Build bundle
 #
 set(MACOSX_BUNDLE_COPYRIGHT "© 2024 Christian Beier (macvnc@christianbeier.net)")
+set(MACOSX_BUNDLE_GUI_IDENTIFIER "net.macvnc.app")
+set(MACOSX_BUNDLE_BUNDLE_NAME ${PROJECT_NAME})
+set(MACOSX_BUNDLE_BUNDLE_VERSION ${PROJECT_VERSION})
 set(MACOSX_BUNDLE_SHORT_VERSION_STRING ${PROJECT_VERSION})
 set(MACOSX_BUNDLE_ICON_FILE icon.icns)
 set_source_files_properties(src/icon.icns PROPERTIES MACOSX_PACKAGE_LOCATION Resources)
@@ -211,7 +221,8 @@ target_link_libraries(${PROJECT_NAME} LibVNCServer::vncserver OpenSSL::SSL OpenS
   ${SCREEN_CAPTURE_KIT}
   ${CORE_MEDIA}
   ${CORE_VIDEO}
-  ${FOUNDATION})
+  ${FOUNDATION}
+  ${APPKIT_LIBRARY})
 
 #
 # Unit tests (CTest always; optional XCTest when using the Xcode generator)
@@ -240,6 +251,41 @@ if(MACVNC_BUILD_TESTS)
   add_test(NAME security_mode COMMAND test_security_mode)
   set_tests_properties(security_mode PROPERTIES
     ENVIRONMENT "LLVM_PROFILE_FILE=${CMAKE_BINARY_DIR}/test_security_mode-%p.profraw")
+
+  add_executable(test_frame_pipeline
+    tests/test_frame_pipeline.c
+    src/frame_pipeline.c
+    src/macvnc_metrics.c
+  )
+  target_include_directories(test_frame_pipeline PRIVATE src tests)
+  target_link_libraries(test_frame_pipeline
+    LibVNCServer::vncserver ${ZLIB_LIBRARY} ${CMAKE_THREAD_LIBS_INIT})
+  add_test(NAME frame_pipeline COMMAND test_frame_pipeline)
+  set_tests_properties(frame_pipeline PROPERTIES
+    ENVIRONMENT "LLVM_PROFILE_FILE=${CMAKE_BINARY_DIR}/test_frame_pipeline-%p.profraw")
+
+  add_executable(test_macvnc_metrics
+    tests/test_macvnc_metrics.c
+    src/macvnc_metrics.c
+  )
+  target_include_directories(test_macvnc_metrics PRIVATE src tests)
+  target_link_libraries(test_macvnc_metrics LibVNCServer::vncserver ${ZLIB_LIBRARY})
+  add_test(NAME macvnc_metrics COMMAND test_macvnc_metrics)
+  set_tests_properties(macvnc_metrics PROPERTIES
+    ENVIRONMENT "LLVM_PROFILE_FILE=${CMAKE_BINARY_DIR}/test_macvnc_metrics-%p.profraw")
+
+  add_executable(test_cursor_map
+    tests/test_cursor_map.m
+    src/cursor_tracker.m
+    src/macvnc_metrics.c
+  )
+  target_include_directories(test_cursor_map PRIVATE src tests)
+  target_link_libraries(test_cursor_map
+    LibVNCServer::vncserver ${ZLIB_LIBRARY} ${CMAKE_THREAD_LIBS_INIT}
+    ${APPKIT_LIBRARY} ${FOUNDATION} ${CARBON_LIBRARY})
+  add_test(NAME cursor_map COMMAND test_cursor_map)
+  set_tests_properties(cursor_map PROPERTIES
+    ENVIRONMENT "LLVM_PROFILE_FILE=${CMAKE_BINARY_DIR}/test_cursor_map-%p.profraw")
 endif()
 
 if(MACVNC_BUILD_XCTEST)
@@ -250,10 +296,14 @@ if(MACVNC_BUILD_XCTEST)
   xctest_add_bundle(MacVNCTests ${PROJECT_NAME}
     tests/MacVNCTests.m
     src/cert_manager.c
+    src/frame_pipeline.c
+    src/macvnc_metrics.c
+    src/cursor_tracker.m
   )
   target_include_directories(MacVNCTests PRIVATE src)
   target_link_libraries(MacVNCTests
-    LibVNCServer::vncserver OpenSSL::SSL OpenSSL::Crypto ${ZLIB_LIBRARY})
+    LibVNCServer::vncserver OpenSSL::SSL OpenSSL::Crypto ${ZLIB_LIBRARY}
+    ${CMAKE_THREAD_LIBS_INIT} ${APPKIT_LIBRARY} ${FOUNDATION} ${CARBON_LIBRARY})
   xctest_add_test(XCTest.MacVNC MacVNCTests)
 endif()
 
@@ -267,4 +317,4 @@ set(BU_CHMOD_BUNDLE_ITEMS ON)
 include(BundleUtilities)
 fixup_bundle(\"${APP}\"   \"\"   \"${DIRS}\")
    " COMPONENT Runtime)
-INSTALL(FILES README.md DESTINATION ${APP})
+INSTALL(FILES README.md DESTINATION ${APP}/Contents/Resources)

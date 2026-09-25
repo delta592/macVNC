@@ -24,6 +24,8 @@ jobs:
           cmake --install build
       - name: Test
         run: ctest --test-dir build --output-on-failure
+      - name: Package (native pkg+dmg smoke)
+        run: DIST_REQUIRE_UNIVERSAL=0 DIST_SKIP_INSTALL=1 DIST_DIR=dist ./scripts/dist.sh build
 
   coverage:
     runs-on: macos-latest

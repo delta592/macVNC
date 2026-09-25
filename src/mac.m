@@ -33,6 +33,7 @@
 #include <rfb/keysym.h>
 #include <IOKit/pwr_mgt/IOPMLib.h>
 #include <IOKit/pwr_mgt/IOPM.h>
+#include <math.h>
 #include <stdio.h>
 #include <pthread.h>
 #include <stdlib.h>
@@ -40,6 +41,9 @@
 
 #import "ScreenCapturer.h"
 #include "cert_manager.h"
+#include "cursor_tracker.h"
+#include "frame_pipeline.h"
+#include "macvnc_metrics.h"
 #include "vencrypt.h"
 
 /* The main LibVNCServer screen object */
@@ -48,13 +52,24 @@ rfbScreenInfoPtr rfbScreen;
 rfbBool viewOnly = FALSE;
 MacVNCSecurityMode securityMode = MACVNC_SECURITY_VENCRYPT_X509;
 rfbBool regenCert = FALSE;
+/* Performance controls — 30 FPS is the Intel/macOS 15 benchmark default. */
+int maxFps = 30;
+double captureScale = 1.0;
+int tileSize = 64;
+rfbBool metricsEnabled = FALSE;
 
 /* Two framebuffers. */
 void *frameBufferOne;
 void *frameBufferTwo;
 
-/* Pointer to the current backbuffer. */
-void *backBuffer;
+/* Cached display pixel size (avoid CGDisplay queries on the hot path). */
+int displayPixelWidth;
+int displayPixelHeight;
+
+/* Frame pipeline and cursor tracker (process lifetime). */
+static MacVNCFramePipeline *gPipeline;
+static MacVNCCursorTracker *gCursorTracker;
+static ScreenCapturer *gCapturer;
 
 /* The multi-sceen display number chosen by the user */
 int displayNumber = -1;
@@ -395,13 +410,14 @@ void
 PtrAddEvent(int buttonMask, int x, int y, rfbClientPtr cl)
 {
     CGPoint position;
-    CGRect displayBounds = CGDisplayBounds(displayID);
     CGEventRef mouseEvent = NULL;
 
     undim();
 
-    position.x = x + displayBounds.origin.x;
-    position.y = y + displayBounds.origin.y;
+    if (gCursorTracker)
+        macvncCursorTrackerNoteRemotePointer(gCursorTracker);
+
+    position = macvncCursorMapFramebufferToDisplay(displayID, captureScale, x, y);
 
     /* map buttons 4 5 6 7 to scroll events as per https://github.com/rfbproto/rfbproto/blob/master/rfbproto.rst#745pointerevent */
     if(buttonMask & (1 << 3))
@@ -511,12 +527,46 @@ rfbBool keyboardInit()
 }
 
 
+static int
+extractDirtyHints(CMSampleBufferRef sampleBuffer, MacVNCRect *out, int maxOut)
+{
+    CFArrayRef dirty;
+    CFIndex count, i;
+    int n = 0;
+
+    if (!sampleBuffer || !out || maxOut <= 0)
+        return 0;
+
+    dirty = CMGetAttachment(sampleBuffer, (__bridge CFStringRef)SCStreamFrameInfoDirtyRects, NULL);
+    if (!dirty || CFGetTypeID(dirty) != CFArrayGetTypeID())
+        return 0;
+
+    count = CFArrayGetCount(dirty);
+    for (i = 0; i < count && n < maxOut; i++) {
+        NSValue *val = (__bridge NSValue *)CFArrayGetValueAtIndex(dirty, i);
+        CGRect r;
+        if (![val respondsToSelector:@selector(rectValue)])
+            continue;
+        r = [val rectValue];
+        if (r.size.width < 1 || r.size.height < 1)
+            continue;
+        out[n].x = (int)floor(r.origin.x);
+        out[n].y = (int)floor(r.origin.y);
+        out[n].w = (int)ceil(r.size.width);
+        out[n].h = (int)ceil(r.size.height);
+        n++;
+    }
+    return n;
+}
+
 rfbBool
 ScreenInit(int argc, char**argv)
 {
   int bitsPerSample = 8;
   CGDisplayCount displayCount;
   CGDirectDisplayID displays[32];
+  MacVNCFramePipelineConfig pipeCfg;
+  int fbWidth, fbHeight;
 
   /* grab the active displays */
   CGGetActiveDisplayList(32, displays, &displayCount);
@@ -535,10 +585,20 @@ ScreenInit(int argc, char**argv)
       return FALSE;
   }
 
+  displayPixelWidth = (int)CGDisplayPixelsWide(displayID);
+  displayPixelHeight = (int)CGDisplayPixelsHigh(displayID);
+  fbWidth = (int)lround((double)displayPixelWidth * captureScale);
+  fbHeight = (int)lround((double)displayPixelHeight * captureScale);
+  if (fbWidth < 1) fbWidth = 1;
+  if (fbHeight < 1) fbHeight = 1;
+  fbWidth = (fbWidth + 3) & ~3; /* LibVNC / viewer friendliness */
+
+  printf("Framebuffer %dx%d (display %dx%d, scale %.3f, maxfps %d, tile %d)\n",
+         fbWidth, fbHeight, displayPixelWidth, displayPixelHeight, captureScale, maxFps, tileSize);
 
   rfbScreen = rfbGetScreen(&argc,argv,
-			   CGDisplayPixelsWide(displayID),
-			   CGDisplayPixelsHigh(displayID),
+			   fbWidth,
+			   fbHeight,
 			   bitsPerSample,
 			   3,
 			   4);
@@ -547,85 +607,104 @@ ScreenInit(int argc, char**argv)
       return FALSE;
   }
 
-  rfbScreen->serverFormat.redShift = bitsPerSample*2;
-  rfbScreen->serverFormat.greenShift = bitsPerSample*1;
+  /*
+   * Capture is BGRA (kCVPixelFormatType_32BGRA). On little-endian Intel that is
+   * blue in the low byte → blueShift=0, redShift=16. Set explicitly so clients
+   * that match this layout can skip rfbTranslateWithRGBTables32to32.
+   */
+  rfbScreen->serverFormat.bitsPerPixel = 32;
+  rfbScreen->serverFormat.depth = 24;
+  rfbScreen->serverFormat.bigEndian = FALSE;
+  rfbScreen->serverFormat.trueColour = TRUE;
+  rfbScreen->serverFormat.redMax = (1 << bitsPerSample) - 1;
+  rfbScreen->serverFormat.greenMax = (1 << bitsPerSample) - 1;
+  rfbScreen->serverFormat.blueMax = (1 << bitsPerSample) - 1;
+  rfbScreen->serverFormat.redShift = bitsPerSample * 2;
+  rfbScreen->serverFormat.greenShift = bitsPerSample * 1;
   rfbScreen->serverFormat.blueShift = 0;
 
   gethostname(rfbScreen->thisHost, 255);
 
-  frameBufferOne = malloc(CGDisplayPixelsWide(displayID) * CGDisplayPixelsHigh(displayID) * 4);
-  frameBufferTwo = malloc(CGDisplayPixelsWide(displayID) * CGDisplayPixelsHigh(displayID) * 4);
+  frameBufferOne = calloc(1, (size_t)fbWidth * (size_t)fbHeight * 4);
+  frameBufferTwo = calloc(1, (size_t)fbWidth * (size_t)fbHeight * 4);
+  if (!frameBufferOne || !frameBufferTwo) {
+      rfbErr("Could not allocate framebuffers.\n");
+      return FALSE;
+  }
 
-  /* back buffer */
-  backBuffer = frameBufferOne;
-  /* front buffer */
-  rfbScreen->frameBuffer = frameBufferTwo;
+  memset(&pipeCfg, 0, sizeof(pipeCfg));
+  pipeCfg.width = fbWidth;
+  pipeCfg.height = fbHeight;
+  pipeCfg.bytesPerPixel = 4;
+  pipeCfg.tileSize = tileSize;
+  pipeCfg.maxRects = 64;
+  pipeCfg.damageFullRatio = 0.45;
+  gPipeline = macvncPipelineCreate(rfbScreen, frameBufferOne, frameBufferTwo, &pipeCfg);
+  if (!gPipeline || !macvncPipelineStart(gPipeline)) {
+      rfbErr("Could not start frame pipeline.\n");
+      return FALSE;
+  }
 
-  /* we already capture the cursor in the framebuffer */
-  rfbScreen->cursor = NULL;
+  /* Separate cursor path — capture excludes the cursor once this is live. */
+  gCursorTracker = macvncCursorTrackerCreate(rfbScreen, displayID, captureScale);
+  macvncCursorTrackerPollShape(gCursorTracker);
 
   rfbScreen->ptrAddEvent = PtrAddEvent;
   rfbScreen->kbdAddEvent = KbdAddEvent;
 
-  ScreenCapturer *capturer = [[ScreenCapturer alloc] initWithDisplay: displayID
-                                                        frameHandler:^(CMSampleBufferRef sampleBuffer) {
-          rfbClientIteratorPtr iterator;
-          rfbClientPtr cl;
+  gCapturer = [[ScreenCapturer alloc] initWithDisplay:displayID
+                                               maxFPS:maxFps
+                                                scale:captureScale
+                                          showsCursor:NO
+                                         frameHandler:^(CMSampleBufferRef sampleBuffer) {
+          CVPixelBufferRef pixelBuffer;
+          MacVNCRect hints[32];
+          int hintCount;
+          size_t srcStride;
+          int w, h;
+          const uint8_t *base;
 
-           /*
-             Copy new frame to back buffer.
-           */
-          CVPixelBufferRef pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer);
-          if(!pixelBuffer)
+          pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer);
+          if (!pixelBuffer || !gPipeline)
               return;
 
-          CVPixelBufferLockBaseAddress(pixelBuffer, kCVPixelBufferLock_ReadOnly);
+          if (CVPixelBufferGetPixelFormatType(pixelBuffer) != kCVPixelFormatType_32BGRA)
+              return;
 
-          memcpy(backBuffer,
-                 CVPixelBufferGetBaseAddress(pixelBuffer),
-                 CGDisplayPixelsWide(displayID) *  CGDisplayPixelsHigh(displayID) * 4);
+          w = (int)CVPixelBufferGetWidth(pixelBuffer);
+          h = (int)CVPixelBufferGetHeight(pixelBuffer);
+          if (w != fbWidth || h != fbHeight)
+              return;
+
+          if (CVPixelBufferLockBaseAddress(pixelBuffer, kCVPixelBufferLock_ReadOnly) != kCVReturnSuccess)
+              return;
+
+          base = CVPixelBufferGetBaseAddress(pixelBuffer);
+          srcStride = CVPixelBufferGetBytesPerRow(pixelBuffer);
+          if (!base || srcStride == 0) {
+              CVPixelBufferUnlockBaseAddress(pixelBuffer, kCVPixelBufferLock_ReadOnly);
+              return;
+          }
+
+          hintCount = extractDirtyHints(sampleBuffer, hints, 32);
+          macvncPipelineSubmitFrame(gPipeline, base, srcStride, w, h,
+                                    hintCount > 0 ? hints : NULL, hintCount,
+                                    macvncNowNs());
 
           CVPixelBufferUnlockBaseAddress(pixelBuffer, kCVPixelBufferLock_ReadOnly);
 
-          /* Lock out client reads. */
-          iterator=rfbGetClientIterator(rfbScreen);
-          while((cl=rfbClientIteratorNext(iterator))) {
-              LOCK(cl->sendMutex);
+          if (gCursorTracker) {
+              macvncCursorTrackerPollShape(gCursorTracker);
+              macvncCursorTrackerPollPosition(gCursorTracker, FALSE);
           }
-          rfbReleaseClientIterator(iterator);
-
-          /* Swap framebuffers. */
-          if (backBuffer == frameBufferOne) {
-              backBuffer = frameBufferTwo;
-              rfbScreen->frameBuffer = frameBufferOne;
-          } else {
-              backBuffer = frameBufferOne;
-              rfbScreen->frameBuffer = frameBufferTwo;
-          }
-
-          /*
-            Mark modified rect in new framebuffer.
-            ScreenCaptureKit does not have something like CGDisplayStreamUpdateGetRects(),
-            so mark the whole framebuffer.
-           */
-          rfbMarkRectAsModified(rfbScreen, 0, 0, CGDisplayPixelsWide(displayID), CGDisplayPixelsHigh(displayID));
-
-          /* Swapping framebuffers finished, reenable client reads. */
-          iterator=rfbGetClientIterator(rfbScreen);
-          while((cl=rfbClientIteratorNext(iterator))) {
-              UNLOCK(cl->sendMutex);
-          }
-          rfbReleaseClientIterator(iterator);
-
       } errorHandler:^(NSError *error) {
           fprintf(stderr, "Error: %s\n", [error.description UTF8String]);
           if(error.code == SCStreamErrorUserDeclined) {
               fprintf(stderr, "Could not get screen contents. Check if the program has been given screen recording permissions in 'System Preferences'->'Security & Privacy'->'Privacy'->'Screen Recording'.\n");
           }
-          //TODO handle other errors
           exit(EXIT_FAILURE);
       }];
-  [capturer startCapture];
+  [gCapturer startCapture];
 
   if (securityMode == MACVNC_SECURITY_VENCRYPT_X509) {
       if (!macvncCertEnsure(regenCert)) {
@@ -654,6 +733,8 @@ enum rfbNewClientAction newClient(rfbClientPtr cl)
 {
   cl->clientGoneHook = clientGone;
   cl->viewOnly = viewOnly;
+  if (gPipeline)
+      macvncPipelineForceFullDamage(gPipeline);
 
   return(RFB_CLIENT_ACCEPT);
 }
@@ -661,12 +742,49 @@ enum rfbNewClientAction newClient(rfbClientPtr cl)
 int main(int argc,char *argv[])
 {
   int i;
+  const char *metricsEnv;
+
+  metricsEnv = getenv("MACVNC_METRICS");
+  if (metricsEnv && metricsEnv[0] == '1')
+      metricsEnabled = TRUE;
 
   for(i=argc-1;i>0;i--)
     if(strcmp(argv[i],"-viewonly")==0) {
       viewOnly=TRUE;
     } else if(strcmp(argv[i],"-display")==0) {
 	displayNumber = atoi(argv[i+1]);
+    } else if(strcmp(argv[i],"-maxfps")==0) {
+        if(i+1 >= argc) {
+            fprintf(stderr, "-maxfps requires a value between 1 and 60\n");
+            exit(EXIT_FAILURE);
+        }
+        maxFps = atoi(argv[i+1]);
+        if(maxFps < 1 || maxFps > 60) {
+            fprintf(stderr, "-maxfps must be between 1 and 60\n");
+            exit(EXIT_FAILURE);
+        }
+    } else if(strcmp(argv[i],"-scale")==0) {
+        if(i+1 >= argc) {
+            fprintf(stderr, "-scale requires a value between 0.25 and 1.0\n");
+            exit(EXIT_FAILURE);
+        }
+        captureScale = atof(argv[i+1]);
+        if(captureScale < 0.25 || captureScale > 1.0) {
+            fprintf(stderr, "-scale must be between 0.25 and 1.0\n");
+            exit(EXIT_FAILURE);
+        }
+    } else if(strcmp(argv[i],"-tile-size")==0) {
+        if(i+1 >= argc) {
+            fprintf(stderr, "-tile-size requires 32 or 64\n");
+            exit(EXIT_FAILURE);
+        }
+        tileSize = atoi(argv[i+1]);
+        if(tileSize != 32 && tileSize != 64) {
+            fprintf(stderr, "-tile-size must be 32 or 64\n");
+            exit(EXIT_FAILURE);
+        }
+    } else if(strcmp(argv[i],"-metrics")==0) {
+        metricsEnabled = TRUE;
     } else if(strcmp(argv[i],"-security")==0 || strcmp(argv[i],"--security")==0) {
         if(i+1 >= argc) {
             fprintf(stderr, "-security requires vencrypt|anontls|plain\n");
@@ -687,6 +805,10 @@ int main(int argc,char *argv[])
     } else if(strcmp(argv[i],"-h") == 0 || strcmp(argv[i],"--help") == 0)  {
         fprintf(stderr, "-viewonly                    Do not allow any input\n");
         fprintf(stderr, "-display <index>             Only export specified display\n");
+        fprintf(stderr, "-maxfps <1-60>               Capture frame-rate cap (default: 30)\n");
+        fprintf(stderr, "-scale <0.25-1.0>            Capture/framebuffer scale (default: 1.0)\n");
+        fprintf(stderr, "-tile-size 32|64             Dirty-region tile size (default: 64)\n");
+        fprintf(stderr, "-metrics                     Log aggregated capture/publish metrics\n");
         fprintf(stderr, "-security vencrypt|anontls|plain\n");
         fprintf(stderr, "                             Traffic encryption mode (default: vencrypt)\n");
         fprintf(stderr, "                             vencrypt = VeNCrypt + X.509 cert (recommended)\n");
@@ -696,6 +818,8 @@ int main(int argc,char *argv[])
         rfbUsage();
         exit(EXIT_SUCCESS);
     }
+
+  macvncMetricsSetEnabled(metricsEnabled);
 
   if(!viewOnly && !AXIsProcessTrusted()) {
       fprintf(stderr, "You have configured the server to post input events, but it does not have the necessary system permission. Please check if the program has been given permission to control your computer in 'System Preferences'->'Security & Privacy'->'Privacy'->'Accessibility'.\n");
@@ -722,8 +846,9 @@ int main(int argc,char *argv[])
      The VNC machinery is in the background now and framebuffer updating happens on another thread as well.
   */
   while(1) {
-      /* Nothing left to do on the main thread. */
-      sleep(1);
+      if (metricsEnabled)
+          macvncMetricsLogSummary("periodic");
+      sleep(metricsEnabled ? 10 : 1);
   }
 
   dimmingShutdown();
