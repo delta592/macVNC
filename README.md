@@ -11,9 +11,13 @@ GPL dump by AT&T Cambridge.
 ## Features
 
 * Fully multi-threaded.
-* Double-buffering for framebuffer updates.
+* Bounded latest-frame capture pipeline with dirty-region tracking (does not
+  block ScreenCaptureKit on client encode/TLS locks).
+* Separate cursor shape/position updates (pointer motion does not dirty the
+  whole framebuffer for capable viewers).
 * Mouse and keyboard input.
 * Multi-monitor support.
+* Capture controls: `-maxfps` (default **30**, tuned for Intel Macs), `-scale`.
 * **VeNCrypt / TLS encryption** (default) — no SSH tunnel required. Works with
   encryption-capable viewers such as TigerVNC Viewer.
 * **Universal binary** (arm64 + x86_64) via per-arch from-source dependencies.
@@ -59,44 +63,44 @@ CPU architecture separately (static libraries), then `lipo`s them into
 | `deps/prefix/<arch>/` | Per-arch install prefix |
 | `deps/prefix/universal/` | Fat static libs + headers |
 
-Rebuild with `./scripts/build-deps.sh --force`. Remove everything with
-`make distclean`.
+Rebuild with `./scripts/build-deps.sh --force`. Full wipe (build trees, deps,
+and packaged artifacts): `make scrub`. `make distclean` keeps `dist/`.
 
 ## 2. Configure & build macVNC
 
 CMake auto-detects `deps/prefix/universal` (or a single-arch prefix).
 
-### Universal app (arm64 + x86_64)
+### Universal app (arm64 + x86_64) — use this on Mac Studio for the Intel iMac
 
 ```bash
-./scripts/build-universal.sh
-# or: make universal
+./scripts/build-deps.sh          # both arches (do not pass --arch=…)
+make universal                   # → build-universal/macVNC.app
 lipo -info build-universal/macVNC.app/Contents/MacOS/macVNC
 # expect: Architectures in the fat file: ... x86_64 arm64
 ```
 
-### Native-only
+Copy **`build-universal/macVNC.app`** (or `make dist`’s `.dmg`) to the iMac.
 
-```bash
-./scripts/build-deps.sh --arch="$(uname -m)"
-cmake -S . -B build -DMACVNC_UNIVERSAL=OFF
-cmake --build build
-```
+`make` / `make build` uses `build/` and follows `UNIVERSAL` (default ON). For a
+dedicated fat artifact that will not collide with a native experiment tree,
+prefer **`make universal`** → always `build-universal/`.
 
 ### Make / Ninja / ccache
 
 ```bash
 make deps                         # from-source OpenSSL + LibVNCServer (optional;
                                   #   also runs automatically before configure)
-make                              # ensure deps + configure + build
+make                              # ensure deps + configure + build → build/
+make universal                    # fat .app → build-universal/
 make GENERATOR=Ninja              # faster incremental builds
-make UNIVERSAL=OFF                # native arch (deps + app)
+make UNIVERSAL=OFF                # native-only into build/
 make DEPS_ARCH=arm64 deps         # single-arch deps only
 make test                         # CTest unit tests
 make COVERAGE=ON coverage         # LLVM coverage + lcov/HTML under build/
 make format-check                 # clang-format on maintained sources
 make tidy                         # clang-tidy via compile_commands.json
 make dist                         # universal .pkg inside .dmg (Intel + Apple Silicon)
+make scrub                        # wipe build/, build-universal/, deps/, dist/
 ```
 
 `ccache` is **required** (configure fails if it is missing). Install with
@@ -144,8 +148,8 @@ timestamp so they never collide. Release names are stable; rebuild with
 |--------|--------|
 | `make dist` | universal `.pkg` + `.dmg` under `DIST_DIR` (default `dist/`) |
 | `make pkg` | universal product `.pkg` only |
-| `make dist-app` | universal `.app` in `DIST_BUILD_DIR` (default `build-universal/`) |
-| `make dist-universal` | alias for `make dist` |
+| `make universal` | universal `.app` in `DIST_BUILD_DIR` (default `build-universal/`) |
+| `make scrub` | wipe `build/`, `build-universal/`, `deps/`, and `dist/` |
 
 `make dist` **fails** if any Mach-O in the bundle is missing `arm64` or
 `x86_64`. The installer XML also sets `hostArchitectures` to `x86_64,arm64`
@@ -165,10 +169,26 @@ Other useful variables: `DIST_DIR`, `DIST_BUILD_DIR`, `DIST_TAG`,
 # Running
 
 ```bash
-./build/macVNC.app/Contents/MacOS/macVNC -rfbport 5901 -passwd 'secret'
+# On the machine you built for (or any Mac, if the .app is universal):
+./build-universal/macVNC.app/Contents/MacOS/macVNC -rfbport 5901 -passwd 'secret'
+# Native-only Studio build (arm64): ./build/macVNC.app/Contents/MacOS/macVNC …
 ```
 
 If Apple's Remote Desktop already owns port 5900, pick another port as above.
+
+**Mac Studio → 2019 Intel iMac:** ship the fat app from `make universal` /
+`build-universal/macVNC.app`. On the iMac, start with defaults (`-maxfps 30`)
+and prefer Hextile in the viewer while measuring. If encode CPU is still high,
+try `-scale 0.5` or lower `-maxfps`. After pulling changes under
+`patches/libvncserver-*`, re-run `./scripts/build-deps.sh` (both arches) so the
+patched LibVNCServer is installed.
+
+| Flag | Meaning |
+|------|---------|
+| `-maxfps <1-60>` | Capture rate cap (default: `30`) |
+| `-scale <0.25-1.0>` | Capture + framebuffer scale; preserves aspect (default: `1.0`) |
+| `-tile-size 32\|64` | Dirty-diff tile size (default: `64`) |
+| `-metrics` | Log aggregated capture/publish counters every 10s (`MACVNC_METRICS=1` also works) |
 
 ## Encryption (default)
 
@@ -217,7 +237,8 @@ If launched from Terminal/iTerm, some TCC entries may show as **Terminal** /
 
 ## Tests
 
-CTest covers cert path/generation and security mode names:
+CTest covers cert path/generation, security mode names, and frame-pipeline
+tile diff/coalesce:
 
 ```bash
 make UNIVERSAL=OFF test

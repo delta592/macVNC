@@ -1,0 +1,197 @@
+--- a/include/rfb/rfb.h	2026-09-25 16:37:45
++++ b/include/rfb/rfb.h	2026-09-25 16:37:45
+@@ -858,6 +858,9 @@
+ extern void rfbRegisterSecurityHandler(rfbSecurityHandler* handler);
+ extern void rfbUnregisterSecurityHandler(rfbSecurityHandler* handler);
+ 
++/** Unregister built-in None/VncAuth handlers (for VeNCrypt-only servers). */
++extern void rfbDisableBuiltinSecurityTypes(void);
++
+ /* rre.c */
+ 
+ extern rfbBool rfbSendRectEncodingRRE(rfbClientPtr cl, int x,int y,int w,int h);
+--- a/src/libvncserver/auth.c	2026-09-25 16:37:45
++++ b/src/libvncserver/auth.c	2026-09-25 16:37:45
+@@ -196,7 +196,19 @@
+     rfbVncAuthNone,
+     NULL
+ };
+-                        
++
++void
++rfbDisableBuiltinSecurityTypes(void)
++{
++    /*
++     * Permanently remove stock handlers and neuter their type bytes so
++     * rfbSendSecurityTypeList cannot re-advertise them via re-register.
++     */
++    rfbUnregisterSecurityHandler(&VncSecurityHandlerVncAuth);
++    rfbUnregisterSecurityHandler(&VncSecurityHandlerNone);
++    VncSecurityHandlerVncAuth.type = 254;
++    VncSecurityHandlerNone.type = 254;
++}
+ 
+ static void
+ rfbSendSecurityTypeList(rfbClientPtr cl, int primaryType)
+--- a/src/libvncserver/rfbssl_openssl.c	2026-09-25 16:37:45
++++ b/src/libvncserver/rfbssl_openssl.c	2026-09-25 16:37:45
+@@ -24,12 +24,28 @@
+ #include "rfbssl.h"
+ #include <openssl/ssl.h>
+ #include <openssl/err.h>
++#include <pthread.h>
++#include <stdlib.h>
+ 
+ struct rfbssl_ctx {
+     SSL_CTX *ssl_ctx;
+     SSL     *ssl;
++    pthread_mutex_t lock;
++    int lock_inited;
+ };
+ 
++static void ssl_lock(struct rfbssl_ctx *ctx)
++{
++    if (ctx && ctx->lock_inited)
++        pthread_mutex_lock(&ctx->lock);
++}
++
++static void ssl_unlock(struct rfbssl_ctx *ctx)
++{
++    if (ctx && ctx->lock_inited)
++        pthread_mutex_unlock(&ctx->lock);
++}
++
+ static void rfbssl_error(void)
+ {
+     char buf[1024];
+@@ -52,9 +68,19 @@
+       keyfile = cl->screen->sslcertfile;
+     }
+ 
+-    if (NULL == (ctx = malloc(sizeof(struct rfbssl_ctx)))) {
++    ctx = calloc(1, sizeof(struct rfbssl_ctx));
++    if (NULL == ctx) {
+ 	rfbErr("OOM\n");
+-    } else if (!cl->screen->sslcertfile || !cl->screen->sslcertfile[0]) {
++	return -1;
++    }
++    if (pthread_mutex_init(&ctx->lock, NULL) != 0) {
++	rfbErr("ssl mutex init failed\n");
++	free(ctx);
++	return -1;
++    }
++    ctx->lock_inited = 1;
++
++    if (!cl->screen->sslcertfile || !cl->screen->sslcertfile[0]) {
+ 	rfbErr("SSL connection but no cert specified\n");
+     } else if (NULL == (ctx->ssl_ctx = SSL_CTX_new(SSLv23_server_method()))) {
+ 	rfbssl_error();
+@@ -69,17 +95,30 @@
+ 	rfbErr("SSL_set_fd failed\n");
+ 	rfbssl_error();
+     } else {
++	ssl_lock(ctx);
+ 	while ((r = SSL_accept(ctx->ssl)) < 0) {
+ 	    if (SSL_get_error(ctx->ssl, r) != SSL_ERROR_WANT_READ)
+ 		break;
+ 	}
+ 	if (r < 0) {
+ 	    rfbErr("SSL_accept failed %d\n", SSL_get_error(ctx->ssl, r));
++	    ssl_unlock(ctx);
+ 	} else {
++	    ssl_unlock(ctx);
+ 	    cl->sslctx = (rfbSslCtx *)ctx;
+ 	    ret = 0;
+ 	}
+     }
++
++    if (ret != 0) {
++	if (ctx->ssl)
++	    SSL_free(ctx->ssl);
++	if (ctx->ssl_ctx)
++	    SSL_CTX_free(ctx->ssl_ctx);
++	if (ctx->lock_inited)
++	    pthread_mutex_destroy(&ctx->lock);
++	free(ctx);
++    }
+     return ret;
+ }
+ 
+@@ -88,10 +127,14 @@
+     int ret;
+     struct rfbssl_ctx *ctx = (struct rfbssl_ctx *)cl->sslctx;
+ 
++    if (!ctx || !ctx->ssl)
++	return -1;
++    ssl_lock(ctx);
+     while ((ret = SSL_write(ctx->ssl, buf, bufsize)) <= 0) {
+ 	if (SSL_get_error(ctx->ssl, ret) != SSL_ERROR_WANT_WRITE)
+ 	    break;
+     }
++    ssl_unlock(ctx);
+     return ret;
+ }
+ 
+@@ -100,10 +143,14 @@
+     int ret;
+     struct rfbssl_ctx *ctx = (struct rfbssl_ctx *)cl->sslctx;
+ 
++    if (!ctx || !ctx->ssl)
++	return -1;
++    ssl_lock(ctx);
+     while ((ret = SSL_peek(ctx->ssl, buf, bufsize)) <= 0) {
+ 	if (SSL_get_error(ctx->ssl, ret) != SSL_ERROR_WANT_READ)
+ 	    break;
+     }
++    ssl_unlock(ctx);
+     return ret;
+ }
+ 
+@@ -112,24 +159,46 @@
+     int ret;
+     struct rfbssl_ctx *ctx = (struct rfbssl_ctx *)cl->sslctx;
+ 
++    if (!ctx || !ctx->ssl)
++	return -1;
++    ssl_lock(ctx);
+     while ((ret = SSL_read(ctx->ssl, buf, bufsize)) <= 0) {
+ 	if (SSL_get_error(ctx->ssl, ret) != SSL_ERROR_WANT_READ)
+ 	    break;
+     }
++    ssl_unlock(ctx);
+     return ret;
+ }
+ 
+ int rfbssl_pending(rfbClientPtr cl)
+ {
+     struct rfbssl_ctx *ctx = (struct rfbssl_ctx *)cl->sslctx;
+-    return SSL_pending(ctx->ssl);
++    int pending;
++
++    if (!ctx || !ctx->ssl)
++	return 0;
++    ssl_lock(ctx);
++    pending = SSL_pending(ctx->ssl);
++    ssl_unlock(ctx);
++    return pending;
+ }
+ 
+ void rfbssl_destroy(rfbClientPtr cl)
+ {
+     struct rfbssl_ctx *ctx = (struct rfbssl_ctx *)cl->sslctx;
++
++    if (!ctx)
++	return;
++    ssl_lock(ctx);
+     if (ctx->ssl)
+ 	SSL_free(ctx->ssl);
++    ctx->ssl = NULL;
+     if (ctx->ssl_ctx)
+ 	SSL_CTX_free(ctx->ssl_ctx);
++    ctx->ssl_ctx = NULL;
++    ssl_unlock(ctx);
++    if (ctx->lock_inited)
++	pthread_mutex_destroy(&ctx->lock);
++    free(ctx);
++    cl->sslctx = NULL;
+ }

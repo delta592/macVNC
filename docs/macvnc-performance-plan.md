@@ -2,138 +2,143 @@
 
 ## Objective and scope
 
-Reduce visible typing, pointer, and window-drag latency at 3200×1800 while retaining VeNCrypt/X.509 encryption. Target responsiveness comparable to the user's RealVNC baseline, but measure the gap rather than promise parity. This document is an implementation plan; no source or installed application changes have been made.
+Reduce visible typing, pointer, and window-drag latency at 3200×1800 while retaining VeNCrypt/X.509 encryption. Target responsiveness comparable to the user's RealVNC baseline, but measure the gap rather than promise parity.
 
-Source reviewed: delta592/macVNC commit `590310402f0de602c83f4bbf09a7d654c61ea0dc`, plus its pinned LibVNCServer 0.9.15 event loop. Confirm the installed build's provenance and current repository revision before implementation.
+**Status (2026-09-25):** Core pipeline, dirty-region, cursor, pixel-format, CLI controls, and TLS reconnect fixes are implemented on branch `perf/capture-pipeline-remediation` and validated on **dauntlas** (2019 Intel iMac, macOS 15.8, x86_64) with TigerVNC over VeNCrypt. Hextile interactive response is reported as excellent; ZRLE remains usable but measurably heavier. Formal external p95 latency tables and optional Tight/JPEG are still open.
+
+Baseline reviewed: commit `590310402f0de602c83f4bbf09a7d654c61ea0dc` + LibVNCServer 0.9.15. Runtime validation used a universal Release build that includes LibVNC patch rev `p1` (SSL mutex + `rfbDisableBuiltinSecurityTypes`).
 
 ## Evidence and limitations
 
-- `/tmp/macvnc-performance.txt`: ZRLE output path dominates approximately 78% of output-thread samples. Capture frequently waits for the client send mutex.
-- `/tmp/macvnc-performance01.txt`: Hextile framebuffer processing occupies approximately 72% of output-thread samples, including approximately 6% in the TLS/socket write path. Pixel translation alone accounts for approximately 19%. Capture mutex waits appear in 3,872 of 8,470 sampling ticks, approximately 46% of the interval. Input spends approximately 99% waiting for socket activity.
-- Hextile substantially improved perceived response; reducing `-deferupdate` did not.
-- `src/mac.m` marks the entire framebuffer modified after each capture. Its capture callback takes every client's `sendMutex` before publishing the framebuffer. LibVNCServer holds that mutex during encoding and transmission.
-- The cursor is included in capture, and `rfbScreen->cursor` is NULL.
-- `src/ScreenCapturer.m` configures capture for up to 60 FPS and exposes no capture scaling or FPS controls.
-- The dependency build disables JPEG and the observed binary rejects Tight encoding.
-- A separate crash report, `/Users/dax/Library/Logs/DiagnosticReports/macVNC-2026-09-25-161339.ips`, faults in `ssl3_pending → SSL_pending → webSocketsHasDataInBuffer → clientInput`.
+### Pre-fix samples (old `/Applications` binary)
 
-Sampling percentages describe stack occupancy, not measured frame latency, exact CPU utilization, or achieved FPS. The recordings use different interactive workloads and cannot establish a precise speedup. They identify encoding and capture synchronization as priorities; they do not exclude viewer or network latency. The crash stack identifies a path to investigate, not a proven root cause.
+- [x] `docs/macvnc-performance.txt` (ZRLE): output-path encode/zlib dominates; capture frequently waits on client `sendMutex`.
+- [x] `docs/macvnc-performance01.txt` (Hextile): framebuffer encode ~72% of output-thread samples; ~19% pixel translate; capture mutex waits ~3872 samples (~46% of interval).
+- [x] Hextile improved perceived response vs ZRLE; reducing `-deferupdate` did not.
+- [x] Crash `macVNC-2026-09-25-161339.ips`: `ssl3_pending → SSL_pending → webSocketsHasDataInBuffer → clientInput`.
+
+### Post-fix samples (Downloads universal build with pipeline)
+
+- [x] `docs/macvnc-performance02.txt` (Hextile): capture mutex waits ~6 (was ~3872); Hextile leaf ~319 (was ~3701); translate leaf **0**; publisher idle on condvar.
+- [x] `docs/macvnc-performance03.txt` (ZRLE): still much better than old ZRLE, but zlib/ZRLE leaf CPU and `sendMutex` waits remain higher than Hextile — matches felt lag.
+- [x] Repeated TigerVNC disconnect/reconnect no longer segfaults.
+
+Sampling percentages describe stack occupancy, not measured viewer presentation latency. Workloads differed across recordings.
 
 ## 1. Establish repeatable measurements
 
-Files: `src/mac.m`, `src/ScreenCapturer.m`, optional new metrics module, and `tests/`.
+Files: `src/macvnc_metrics.*`, `src/mac.m`, `tests/`.
 
-1. Reproduce the current behavior with a Release build and record commit, dependencies, architecture, display pixel dimensions, viewer version/settings, transport, and network conditions.
-2. Add optional low-overhead, aggregated metrics or signposts for capture arrival, source-frame age, copy/diff duration, publication wait, encoding duration, socket-write duration, dirty pixel count, bytes sent, and frames superseded. Do not log keystroke contents or one line per frame.
-3. Instrument LibVNCServer at explicit update boundaries if application hooks cannot provide reliable encoding/write timings. Keep any dependency patch small and versioned.
-4. Run the same workloads: idle desktop; repeated typing in a plain text editor; pointer movement; repeated window dragging; scrolling text; a high-motion scene. Include one deliberately slow client.
-5. Measure input-to-visible-result latency externally, such as timestamped test content plus high-frame-rate recording of local and remote screens. Internal timestamps alone do not measure viewer presentation latency.
-6. Capture CPU samples and network throughput alongside latency. Use Hextile as the initial diagnostic baseline, then repeat with ZRLE.
+- [x] Reproduce with Release/universal builds on the Intel host; record samples under `docs/macvnc-performance*.txt`.
+- [x] Add optional aggregated metrics (`-metrics` / `MACVNC_METRICS=1`) for submit/supersede/publish, capture wait, publish wait, copy/diff, dirty tiles/pixels, frame age — no per-keystroke or per-frame spam.
+- [ ] Instrument LibVNCServer encode/socket-write boundaries (optional; app-level metrics + `sample` were sufficient for the first remediation).
+- [x] Run interactive workloads (typing, pointer, window drag) under Hextile and ZRLE with VeNCrypt.
+- [ ] External input-to-visible latency (high-frame-rate dual-screen recording / timed test content) with median/p95 table.
+- [x] Capture CPU samples alongside interactive testing (before/after Hextile + after ZRLE).
 
-Deliverable: baseline table containing median/p95 visible latency, frame age, delivered FPS, bytes/s, dirty-area ratio, CPU, memory, and capture lock waits.
+**Deliverable:** informal before/after sample comparison done; formal baseline table (p95 visible latency, FPS, bytes/s, etc.) still open.
 
 ## 2. Decouple capture from encoding safely
 
-Files: `src/ScreenCapturer.m`, `src/mac.m`; preferably a small new frame-pipeline module with explicit ownership.
+Files: `src/frame_pipeline.*`, `src/mac.m`, `src/ScreenCapturer.m`.
 
-Implement a bounded latest-frame handoff before changing encoding algorithms:
+- [x] Bounded latest-frame pending slot; superseded frames drop prior pending content.
+- [x] Separate publisher thread; capture no longer waits on client `sendMutex`.
+- [x] Double-buffer publish under brief, consistent client locking with `rfbIncrClientRef` / matching unlock set.
+- [x] Stride-aware copy into the pending buffer; validate CVPixelBuffer format/size before submit.
+- [x] Re-check for a newer pending frame after preparing a candidate (avoid publishing stale frames after long waits where safe).
+- [x] Disconnect/reconnect exercised manually with TigerVNC (no capture/publish deadlock observed).
+- [ ] Per-client immutable snapshots if a slow client still couples too hard (not required yet on wired LAN).
+- [ ] Longer automated stress (30+ minutes) and multi-client tests.
 
-- Capture callbacks publish an owned frame or retained pixel buffer into a bounded pending slot and return promptly. Replacing a pending frame releases its resources. Do not queue an unbounded history of frames.
-- A separate publisher consumes the latest available frame and performs framebuffer updates. It may initially retain the existing encoder exclusion mechanism, but capture must no longer wait on client send locks.
-- Treat this as a staged improvement: moving the lock wait off capture reduces capture blockage but does not by itself remove encoder serialization or network-induced lag.
-- Never overwrite a buffer an encoder may still read. Specify ownership states, generation numbers, retain/release rules, and shutdown behavior. A third buffer alone does not make concurrent access safe.
-- Audit client iteration/lifetime: the existing separate iterations for lock and unlock can observe different client sets. Hold valid client references and use consistent lock ordering, with disconnect/reconnect tests.
-- If slow-client tests show unacceptable coupling, introduce per-client immutable frame snapshots or an explicit LibVNCServer snapshot/acquire-release integration. Audit all framebuffer and scaled-screen readers before changing global pointer lifetimes. Avoid a casual global pointer swap or removal of locks.
-- Re-fetch the newest pending frame after long publication waits where safe, rather than publishing an unnecessarily stale candidate.
-
-Acceptance: bounded memory and pending-frame count; no sustained capture-callback waits on encoding/network I/O; no tearing, use-after-free, or deadlocks under slow-client and disconnect tests. Report publication waits separately from capture waits.
+**Acceptance (observed):** capture mutex contention effectively gone in Hextile sample; no tearing reported; reconnect works.
 
 ## 3. Track actual changed regions
 
-Files: frame-pipeline module, `src/mac.m`, `src/ScreenCapturer.m`.
+Files: `src/frame_pipeline.*`, `src/mac.m`.
 
-- Replace unconditional full-screen `rfbMarkRectAsModified` with bounded, coalesced dirty regions.
-- First implement a correct row-stride-aware tile comparison against the last published framebuffer, for example 32×32 or 64×64 tiles. Benchmark tile sizes rather than fixing one arbitrarily.
-- Check pixel-buffer frame status, dimensions, format, bytes per row, lock results, and allocation bounds. Copy row by row where strides differ. Do not assume width × height × 4 matches the source layout.
-- Evaluate ScreenCaptureKit frame attachments for dirty-rectangle metadata supported by the deployment target; verify availability and coordinate semantics against Apple documentation before implementation. Use metadata as an optimization, with a correctness fallback.
-- Important: capture metadata may describe changes since the preceding captured frame. If pending frames are dropped, union all intervening damage or compare the latest image against the last published image. Otherwise updates can disappear permanently.
-- Preserve each client's unsent modified region until that client consumes it. A global published-frame comparison does not replace per-client damage accumulation.
-- Clip, transform, and coalesce rectangles; bound rectangle count and fall back to full-frame updates for large damage. Full damage is also required for initial connections, geometry changes, or invalid reference state.
-- Cache stable display dimensions instead of querying CoreGraphics repeatedly inside the hot callback; refresh them through explicit display-change handling.
+- [x] Replace unconditional full-screen `rfbMarkRectAsModified` with tile diff + coalesced rects (default tile **64**; CLI `-tile-size 32|64`).
+- [x] Row-stride-aware compare/copy; do not assume packed `width*height*4` from the CVPixelBuffer.
+- [x] Use `SCStreamFrameInfoDirtyRects` as a hint when present; on dropped pending frames ignore stale hints and full-compare against last published.
+- [x] Rely on LibVNC per-client modified regions after mark; force full damage on new client connect.
+- [x] Bound coalesced rect count / dirty ratio → full-frame fallback.
+- [x] Cache display/framebuffer dimensions for the hot path (scale applied at init).
+- [x] Unit tests for tile diff / coalesce overflow (`tests/test_frame_pipeline.c`).
+- [ ] Explicit display-reconfiguration / geometry-change handler beyond initial setup.
+- [ ] Dedicated multi-client and padded-stride device matrix beyond dauntlas.
 
-Acceptance: static desktop causes no repeated full-frame encoding; a typed character damages only a small region; dropped intermediate frames, scrolling, overlapping rectangles, reconnects, and multi-client updates remain visually correct. Test padded rows and geometry changes.
+**Acceptance (observed):** static UI / typing no longer drives full-frame Hextile cost in samples; interactive feel matches.
 
 ## 4. Separate cursor presentation from framebuffer updates
 
-Files: `src/ScreenCapturer.m`, pointer/cursor handling in `src/mac.m`.
+Files: `src/cursor_tracker.*`, `src/ScreenCapturer.m`, `src/mac.m`.
 
-- Disable capture of the cursor only once a functioning separate-cursor path exists.
-- Use supported macOS mechanisms to acquire cursor shape/hotspot changes and advertise them through LibVNCServer cursor APIs. Investigate API/thread constraints before selecting the mechanism; do not assume querying an application-local cursor gives the system-wide cursor.
-- Let compatible viewers render the pointer locally. Handle cursor position updates for locally driven motion without introducing a feedback loop for remote input.
-- Preserve an explicit fallback for clients without cursor-shape support. Prevent missing or double cursors, and validate text/I-beam, resize, drag, hidden cursor, and hotspot behavior.
-- Correctly map framebuffer pixels to macOS display coordinates on Retina/scaled displays, secondary displays, and displays with negative origins. Apply any capture scale to input coordinates consistently.
-- Profile modern `CGEventCreateMouseEvent` injection versus the deprecated path, preserving button transitions, drags, double-clicks, and scroll behavior. This is secondary to visual-update work; current samples do not identify input injection as the dominant cost.
+- [x] Disable SCK cursor compositing (`showsCursor=NO`) once rich-cursor path exists.
+- [x] Publish cursor shape via LibVNC rich cursor (`NSCursor` → BGRA + **mask from alpha**).
+- [x] Map framebuffer ↔ display coordinates with origin + `-scale`; suppress local cursor echo briefly after remote `PtrAddEvent`.
+- [x] Fixed NULL `mask` segfault in `rfbSendCursorShape` on first client framebuffer update.
+- [ ] Exhaustive cursor-shape matrix (I-beam, resize, drag, hidden) on secondary/negative-origin displays.
+- [ ] Profile `CGEventCreateMouseEvent` vs deprecated `CGPostMouseEvent` (still secondary).
 
-Acceptance: pointer-only movement does not cause full-screen capture/encoding traffic for supporting viewers, and local cursor motion remains responsive under heavy screen updates.
+**Acceptance (observed):** pointer motion responsive; no cursor-send crash after mask fix; supporting viewers use local cursor rendering.
 
 ## 5. Reduce pixel conversion and expose bounded performance controls
 
-Files: `src/mac.m`, `src/ScreenCapturer.m`, CLI parsing/help, README, tests.
+Files: `src/mac.m`, `src/ScreenCapturer.m`, README, CLI help.
 
-- Investigate why Hextile invokes `rfbTranslateWithRGBTables32to32` despite a BGRA capture format and apparently compatible 32-bit client pixels. Compare negotiated endian flags, depth, channel maxima/shifts, and padding semantics.
-- Set an accurate server pixel format; use a library-supported no-conversion path only when layouts truly match. Do not mislabel BGRA data or force a client format it cannot interpret. Validate channel order with color bars and gradients on Intel and Apple Silicon.
-- Introduce clearly documented application options such as `-maxfps` and `-scale` (proposed names, not existing flags). Validate ranges and preserve aspect ratio. Consider 30 FPS as a benchmark candidate, not an assumed optimal default.
-- Keep capture, published framebuffer dimensions, dirty coordinates, cursor hotspot, and input coordinate transforms consistent under scaling.
-- Retain Hextile/ZRLE compatibility. Raw is a controlled LAN benchmark option, not a blanket recommendation at 3200×1800.
-- Evaluate bundling libjpeg-turbo and enabling Tight/JPEG only after the pipeline fixes. Measure text quality, CPU, bandwidth, packaging, and licensing impact; don't make lossy encoding mandatory or assume enabling a build flag alone is sufficient.
+- [x] Set explicit LE BGRA server format (`depth=24`, shifts, `bigEndian=FALSE`); post-fix Hextile sample shows **0** `rfbTranslateWithRGBTables32to32` leaves.
+- [x] CLI: `-maxfps` (default **30**), `-scale` (0.25–1.0), `-tile-size`, `-metrics`.
+- [x] Keep capture size, FB size, dirty coords, and pointer mapping consistent under scale.
+- [x] Retain Hextile/ZRLE; recommend Hextile for interactive LAN on Intel.
+- [ ] Color-bar / gradient validation pass on both Intel and Apple Silicon viewers.
+- [ ] Evaluate libjpeg-turbo / Tight only if measurements justify (deferred; pipeline first).
 
-Acceptance: compatible formats avoid unnecessary translation; incompatible formats render correctly; scale/FPS settings behave predictably and produce useful CPU/bandwidth tradeoffs.
+**Acceptance (observed):** no unnecessary translation in Hextile sample; FPS/scale knobs documented and used on dauntlas.
 
 ## 6. Resolve TLS stability and negotiation defects
 
-Files: `src/vencrypt.c`, `scripts/build-deps.sh`, versioned LibVNCServer patches if needed.
+Files: `src/vencrypt.c`, `scripts/build-deps.sh`, `patches/libvncserver-0.9.15/`.
 
-Treat this as a release blocker alongside performance work, not proof that encryption causes the observed lag:
+- [x] Reproduce disconnect/reconnect crash; root cause concurrent SSL use / teardown (`SSL_pending` on bad/freed state).
+- [x] Versioned LibVNC patch: per-`sslctx` mutex around SSL I/O + null-safe `pending`/`destroy`.
+- [x] Replace dyld private-symbol neutering with `rfbDisableBuiltinSecurityTypes()` from the same patch (works with static link).
+- [x] AnonTLS OpenSSL ctx layout matches patched `rfbssl_openssl.c` (mutex fields).
+- [x] Manual reconnect loops with TigerVNC + VeNCrypt succeed after the fix.
+- [ ] Extended automated TLS stress (handshakes during writes, multi-hour soak).
+- [ ] Confirm fail-closed advertising on a clean install without relying on viewer `-SecurityTypes` overrides.
 
-- Reproduce the SSL_pending crash under simultaneous input/output, reconnects, disconnects during writes, and TLS handshakes. Audit SSL object ownership, lifetime, and concurrent calls from input/output threads against the pinned OpenSSL and LibVNCServer implementations.
-- Check for premature destruction, stale references, and unsupported concurrent access before choosing a fix. Avoid adding a blocking global TLS mutex that creates input/output starvation or deadlocks.
-- Replace the private-symbol handler mutation used to suppress unencrypted security types with supported library integration or an explicit maintained dependency patch. The current image-name search misses statically linked LibVNCServer.
-- Ensure encrypted mode advertises only intended encrypted security types, correctly chooses X509None versus X509Vnc, and fails closed when enforcement cannot be established.
-- Preserve certificate validation and encrypted transport throughout performance tests.
+**Acceptance (observed):** reconnect no longer segfaults; encrypted sessions used throughout post-fix samples.
 
-Acceptance: repeatable stress sessions complete without crashes; encrypted-only negotiation works in static release builds; no authentication regression or hidden unencrypted fallback.
+## Implementation sequence (checklist)
 
-## Implementation sequence and review boundaries
+1. [x] Metrics + reproducible `sample` benchmarks (formal p95 table optional follow-up).
+2. [x] Bounded capture handoff, ownership/lifetime, stride/frame validation.
+3. [x] Changed-region tracking and dropped-frame correctness.
+4. [x] Separate cursor updates and coordinate mapping (mask fix included).
+5. [x] Pixel-format fast path and `-maxfps` / `-scale` controls.
+6. [ ] Optional additional encoders (Tight/JPEG) — only if needed after measurement.
+7. [x] TLS stability fix before release candidate packaging (`make dist`).
 
-1. Metrics, reproducible benchmarks, and regression fixtures.
-2. Bounded capture handoff, ownership/lifetime fixes, and stride/frame validation.
-3. Changed-region tracking and dropped-frame correctness.
-4. Separate cursor updates and coordinate mapping.
-5. Pixel-format fast path and measured scale/FPS controls.
-6. Optional additional encoders, only if measurements justify them.
+## Validation and success criteria
 
-Investigate TLS stability alongside these changes and complete its fix before release. Keep each change independently reviewable and benchmark it against the same baseline. Do not combine an unmeasured encoder switch with a concurrency rewrite in one change.
+- [x] Existing CTest + new frame-pipeline tests.
+- [x] Release universal build on 3200×-class Intel display; Hextile and ZRLE over VeNCrypt on wired LAN.
+- [x] Qualitative: Hextile typing/pointer/window updates “extremely good / highly responsive.”
+- [x] Sample-based: ≥ order-of-magnitude drop in capture mutex waits and Hextile leaf cost vs pre-fix Hextile.
+- [x] Repeated client reconnect without crash.
+- [ ] Formal p95 typing-to-visible &lt; 100 ms claim (needs external measurement).
+- [ ] 30-minute automated stress + multi-client matrix.
+- [ ] Sanitizer builds where compatible (not for perf compares).
+- [ ] Side-by-side RealVNC latency capture under identical content/network.
 
-## Validation and proposed success criteria
+## Packaging / build notes
 
-Run existing tests plus focused tests for region merging, dropped-frame damage, stride handling, ownership, coordinate transforms, and disconnect races. Use sanitizers where compatible; do not use sanitizer builds for performance comparisons.
-
-Benchmark Release builds at the original 3200×1800 resolution and at a reduced resolution, with Hextile and ZRLE, on controlled wired LAN and a representative wireless connection. Test one and multiple clients. Compare with RealVNC using the same screen content, resolution, and network.
-
-Proposed targets to refine after baseline measurement:
-
-- At least 50% reduction in p95 typing-to-visible latency versus current Hextile; aim for p95 below 100 ms on the reference wired LAN, with no claim of guaranteed RealVNC parity.
-- Capture handoff p95 below one frame interval at the configured capture rate; no unbounded age or memory growth under overload.
-- No full-frame invalidation for pointer-only motion with separate-cursor-capable clients; substantial dirty-area reduction for typing and static UI workloads.
-- Smooth 30 FPS window motion where hardware/network permit, without worsening input latency; measure delivered FPS rather than configured FPS.
-- At least 30 minutes of interactive/automated stress and repeated reconnect cycles without crash, deadlock, tearing, or stale regions.
-
-Record failures and tradeoffs rather than relaxing correctness to hit a latency number. Ship measured results, updated CLI documentation, and a rollback path with the release.
+- [x] `make universal` / `make dist` produce fat `arm64+x86_64` apps via `build-universal/`.
+- [x] `make scrub` wipes `build/`, `build-universal/`, `deps/`, and `dist/` for a clean rebuild.
+- [x] LibVNC patches applied from `patches/libvncserver-0.9.15/` during `scripts/build-deps.sh` (stamp `…-p1`).
 
 ## Source references
 
-- https://github.com/delta592/macVNC/blob/590310402f0de602c83f4bbf09a7d654c61ea0dc/src/mac.m
-- https://github.com/delta592/macVNC/blob/590310402f0de602c83f4bbf09a7d654c61ea0dc/src/ScreenCapturer.m
-- https://github.com/delta592/macVNC/blob/590310402f0de602c83f4bbf09a7d654c61ea0dc/src/vencrypt.c
-- https://github.com/delta592/macVNC/blob/590310402f0de602c83f4bbf09a7d654c61ea0dc/scripts/build-deps.sh
-- https://github.com/LibVNC/libvncserver/blob/LibVNCServer-0.9.15/src/libvncserver/main.c
+- In-tree (post-remediation): `src/mac.m`, `src/ScreenCapturer.m`, `src/frame_pipeline.*`, `src/cursor_tracker.*`, `src/macvnc_metrics.*`, `src/vencrypt.c`, `scripts/build-deps.sh`, `patches/libvncserver-0.9.15/`
+- Baseline commit tree: https://github.com/delta592/macVNC/blob/590310402f0de602c83f4bbf09a7d654c61ea0dc/src/mac.m
+- LibVNCServer 0.9.15: https://github.com/LibVNC/libvncserver/blob/LibVNCServer-0.9.15/src/libvncserver/main.c

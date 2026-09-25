@@ -52,7 +52,7 @@ fi
 
 if [[ ! -d "${BUILD}" ]]; then
   echo "Missing build directory: ${BUILD}" >&2
-  echo "Build a universal app first: make dist-app  (uses scripts/build-deps.sh)" >&2
+  echo "Build a universal app first: make universal  (or make dist)" >&2
   exit 1
 fi
 

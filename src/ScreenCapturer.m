@@ -3,9 +3,11 @@
 @interface ScreenCapturer ()
 
 @property (nonatomic, assign) CGDirectDisplayID displayID;
+@property (nonatomic, assign, readwrite) int maxFPS;
+@property (nonatomic, assign, readwrite) double scale;
+@property (nonatomic, assign, readwrite) BOOL showsCursor;
 @property (nonatomic, strong) SCStream *stream;
 
-// handlers
 @property (nonatomic, copy, nonnull) void (^frameHandler)(CMSampleBufferRef sampleBuffer);
 @property (nonatomic, copy, nonnull) void (^errorHandler)(NSError *error);
 
@@ -15,10 +17,16 @@
 @implementation ScreenCapturer
 
 - (instancetype)initWithDisplay:(CGDirectDisplayID)displayID
+                         maxFPS:(int)maxFPS
+                          scale:(double)scale
+                    showsCursor:(BOOL)showsCursor
                    frameHandler:(void (^)(CMSampleBufferRef))frameHandler
                    errorHandler:(void (^)(NSError *))errorHandler {
     if (self = [super init]) {
         _displayID = displayID;
+        _maxFPS = maxFPS > 0 ? maxFPS : 60;
+        _scale = scale > 0.0 ? scale : 1.0;
+        _showsCursor = showsCursor;
         _frameHandler = [frameHandler copy];
         _errorHandler = [errorHandler copy];
     }
@@ -45,12 +53,27 @@
         }
 
         SCStreamConfiguration *config = [[SCStreamConfiguration alloc] init];
-        // can later be adjusted for server-side scaling
-        config.width = display.width;
-        config.height = display.height;
-        // set max frame rate to 60 FPS
-        config.minimumFrameInterval = CMTimeMake(1, 60);
+        int outW = (int)lround((double)display.width * self.scale);
+        int outH = (int)lround((double)display.height * self.scale);
+        if (outW < 1)
+            outW = 1;
+        if (outH < 1)
+            outH = 1;
+        /* LibVNC / many viewers prefer width multiple of 4. */
+        outW = (outW + 3) & ~3;
+
+        config.width = outW;
+        config.height = outH;
+        config.minimumFrameInterval = CMTimeMake(1, self.maxFPS);
         config.pixelFormat = kCVPixelFormatType_32BGRA;
+        config.showsCursor = self.showsCursor;
+        if ([config respondsToSelector:@selector(setQueueDepth:)]) {
+            /* Keep capture backlog small so dropped frames stay bounded. */
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wunguarded-availability-new"
+            config.queueDepth = 3;
+#pragma clang diagnostic pop
+        }
 
         SCContentFilter *filter = [[SCContentFilter alloc] initWithDisplay:(display) excludingWindows:(@[])];
         self.stream = [[SCStream alloc] initWithFilter:filter configuration:config delegate:self];
@@ -58,7 +81,7 @@
         NSError *addOutputError = nil;
         [self.stream addStreamOutput:self
                                 type:SCStreamOutputTypeScreen
-                  sampleHandlerQueue:dispatch_queue_create("libvncserver.examples.mac", NULL)
+                  sampleHandlerQueue:dispatch_queue_create("net.macvnc.capture", NULL)
                                error:&addOutputError];
         if (addOutputError) {
             self.errorHandler(addOutputError);

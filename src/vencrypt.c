@@ -4,8 +4,8 @@
 #include <rfb/rfbconfig.h>
 #include <rfb/rfbproto.h>
 
-#include <dlfcn.h>
 #include <errno.h>
+#include <pthread.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -13,10 +13,6 @@
 #include <sys/select.h>
 #include <time.h>
 #include <unistd.h>
-
-#include <mach-o/dyld.h>
-#include <mach-o/loader.h>
-#include <mach-o/nlist.h>
 
 #include <openssl/err.h>
 #include <openssl/ssl.h>
@@ -34,102 +30,25 @@
 
 /* libvncserver backend entry — works for both OpenSSL and GnuTLS builds */
 extern int rfbssl_init(rfbClientPtr cl);
-
-/* Not a real RFB type — kept in the handler list but ignored by viewers. */
-#define MACVNC_DISABLED_SEC_TYPE 254
+/* Provided by macVNC's LibVNCServer patch (rev ≥1). */
+extern void rfbDisableBuiltinSecurityTypes(void);
 
 static MacVNCSecurityMode gSecurityMode = MACVNC_SECURITY_VENCRYPT_X509;
 static rfbPasswordCheckProcPtr gOriginalPasswordCheck = NULL;
 static char *gDummyPasswdList[2] = {"__macvnc_block_unencrypted__", NULL};
 static rfbBool gOwnPasswdList = FALSE;
 
-/*
- * libvncserver always prepends VncAuth/None before custom handlers, and
- * TigerVNC 1.14 picks the first offered type it supports. Locate those
- * stock handlers in the dylib and change their type byte so encrypted
- * mode effectively advertises VeNCrypt only.
- */
-static void *
-findLibVncLocalSymbol(const char *symname)
-{
-    uint32_t i, n = _dyld_image_count();
-
-    for (i = 0; i < n; i++) {
-        const char *imageName = _dyld_get_image_name(i);
-        const struct mach_header_64 *mh;
-        intptr_t slide;
-        const uint8_t *cmd;
-        uint32_t c;
-        const struct symtab_command *symtab = NULL;
-        const struct segment_command_64 *linkedit = NULL;
-
-        if (!imageName || !strstr(imageName, "libvncserver"))
-            continue;
-
-        mh = (const struct mach_header_64 *)_dyld_get_image_header(i);
-        if (!mh || mh->magic != MH_MAGIC_64)
-            continue;
-
-        slide = _dyld_get_image_vmaddr_slide(i);
-        cmd = (const uint8_t *)(mh + 1);
-        for (c = 0; c < mh->ncmds; c++) {
-            const struct load_command *lc = (const struct load_command *)cmd;
-            if (lc->cmd == LC_SYMTAB)
-                symtab = (const struct symtab_command *)lc;
-            if (lc->cmd == LC_SEGMENT_64) {
-                const struct segment_command_64 *sg = (const struct segment_command_64 *)lc;
-                if (strcmp(sg->segname, "__LINKEDIT") == 0)
-                    linkedit = sg;
-            }
-            cmd += lc->cmdsize;
-        }
-        if (!symtab || !linkedit)
-            continue;
-
-        {
-            const uint8_t *linkeditBase =
-                (const uint8_t *)(linkedit->vmaddr + slide - linkedit->fileoff);
-            const struct nlist_64 *syms = (const struct nlist_64 *)(linkeditBase + symtab->symoff);
-            const char *strs = (const char *)(linkeditBase + symtab->stroff);
-            uint32_t s;
-
-            for (s = 0; s < symtab->nsyms; s++) {
-                const char *sn;
-                if (syms[s].n_un.n_strx == 0)
-                    continue;
-                sn = strs + syms[s].n_un.n_strx;
-                if (strcmp(sn, symname) == 0)
-                    return (void *)(syms[s].n_value + slide);
-            }
-        }
-    }
-    return NULL;
-}
-
-static void
-neuterStockSecurityHandler(const char *symname)
-{
-    rfbSecurityHandler *handler = findLibVncLocalSymbol(symname);
-    if (!handler) {
-        rfbErr("vencrypt: could not locate %s — older viewers may still "
-               "prefer plain VncAuth; use -SecurityTypes=X509Vnc\n",
-               symname);
-        return;
-    }
-    rfbLog("vencrypt: disabling stock security type %u (%s) for encrypted mode\n", handler->type,
-           symname);
-    handler->type = MACVNC_DISABLED_SEC_TYPE;
-}
-
 static void
 disableStockUnencryptedTypes(void)
 {
     /*
-     * Force libvncserver to load so local symbols are mapped before we search.
+     * libvncserver always prepends VncAuth/None before custom handlers, and
+     * TigerVNC 1.14 picks the first offered type it supports. The patched
+     * helper unregisters those stock handlers and neuters their type bytes
+     * so re-registration during auth cannot re-advertise them.
      */
-    dlopen(NULL, RTLD_NOW);
-    neuterStockSecurityHandler("_VncSecurityHandlerVncAuth");
-    neuterStockSecurityHandler("_VncSecurityHandlerNone");
+    rfbDisableBuiltinSecurityTypes();
+    rfbLog("vencrypt: disabled built-in None/VncAuth security types\n");
 }
 
 static void
@@ -149,10 +68,12 @@ logSslErrors(const char *where)
 }
 
 #if defined(LIBVNCSERVER_HAVE_LIBSSL)
-/* Must match libvncserver rfbssl_openssl.c */
+/* Must match patched libvncserver rfbssl_openssl.c (macVNC patch rev ≥1). */
 struct rfbssl_openssl_ctx {
     SSL_CTX *ssl_ctx;
     SSL *ssl;
+    pthread_mutex_t lock;
+    int lock_inited;
 };
 
 static void
@@ -164,6 +85,8 @@ freeOpensslCtx(struct rfbssl_openssl_ctx *ctx)
         SSL_free(ctx->ssl);
     if (ctx->ssl_ctx)
         SSL_CTX_free(ctx->ssl_ctx);
+    if (ctx->lock_inited)
+        pthread_mutex_destroy(&ctx->lock);
     free(ctx);
 }
 
@@ -224,12 +147,18 @@ tlsAcceptAnonOpenSSL(rfbClientPtr cl)
         rfbErr("vencrypt: OOM\n");
         return -1;
     }
+    if (pthread_mutex_init(&ctx->lock, NULL) != 0) {
+        rfbErr("vencrypt: ssl mutex init failed\n");
+        free(ctx);
+        return -1;
+    }
+    ctx->lock_inited = 1;
 
     ctx->ssl_ctx = SSL_CTX_new(TLS_server_method());
     if (!ctx->ssl_ctx) {
         rfbErr("vencrypt: SSL_CTX_new failed\n");
         logSslErrors("SSL_CTX_new");
-        free(ctx);
+        freeOpensslCtx(ctx);
         return -1;
     }
 

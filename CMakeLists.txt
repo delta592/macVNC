@@ -124,6 +124,7 @@ find_library(SCREEN_CAPTURE_KIT ScreenCaptureKit REQUIRED)
 find_library(CORE_MEDIA CoreMedia)
 find_library(CORE_VIDEO CoreVideo)
 find_library(FOUNDATION Foundation)
+find_library(APPKIT_LIBRARY AppKit REQUIRED)
 find_library(ZLIB_LIBRARY z REQUIRED)
 find_library(SASL2_LIBRARY sasl2)
 
@@ -190,6 +191,12 @@ set(SOURCE_FILES
     src/ScreenCapturer.m
     src/cert_manager.h
     src/cert_manager.c
+    src/cursor_tracker.h
+    src/cursor_tracker.m
+    src/frame_pipeline.h
+    src/frame_pipeline.c
+    src/macvnc_metrics.h
+    src/macvnc_metrics.c
     src/vencrypt.h
     src/vencrypt.c
     src/mac.m
@@ -214,7 +221,8 @@ target_link_libraries(${PROJECT_NAME} LibVNCServer::vncserver OpenSSL::SSL OpenS
   ${SCREEN_CAPTURE_KIT}
   ${CORE_MEDIA}
   ${CORE_VIDEO}
-  ${FOUNDATION})
+  ${FOUNDATION}
+  ${APPKIT_LIBRARY})
 
 #
 # Unit tests (CTest always; optional XCTest when using the Xcode generator)
@@ -243,6 +251,18 @@ if(MACVNC_BUILD_TESTS)
   add_test(NAME security_mode COMMAND test_security_mode)
   set_tests_properties(security_mode PROPERTIES
     ENVIRONMENT "LLVM_PROFILE_FILE=${CMAKE_BINARY_DIR}/test_security_mode-%p.profraw")
+
+  add_executable(test_frame_pipeline
+    tests/test_frame_pipeline.c
+    src/frame_pipeline.c
+    src/macvnc_metrics.c
+  )
+  target_include_directories(test_frame_pipeline PRIVATE src tests)
+  target_link_libraries(test_frame_pipeline
+    LibVNCServer::vncserver ${ZLIB_LIBRARY} ${CMAKE_THREAD_LIBS_INIT})
+  add_test(NAME frame_pipeline COMMAND test_frame_pipeline)
+  set_tests_properties(frame_pipeline PROPERTIES
+    ENVIRONMENT "LLVM_PROFILE_FILE=${CMAKE_BINARY_DIR}/test_frame_pipeline-%p.profraw")
 endif()
 
 if(MACVNC_BUILD_XCTEST)

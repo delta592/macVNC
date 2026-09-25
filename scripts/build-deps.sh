@@ -178,14 +178,52 @@ build_openssl() {
   echo "OpenSSL installed → $prefix"
 }
 
+# Versioned patches under patches/libvncserver-<ver>/ applied after extract.
+# Bump PATCH_REV when patches change so stamps force a rebuild.
+LIBVNCSERVER_PATCH_REV="${LIBVNCSERVER_PATCH_REV:-1}"
+
+apply_libvncserver_patches() {
+  local src="$1"
+  local patch_dir="$ROOT/patches/libvncserver-${LIBVNCSERVER_VERSION}"
+  local marker="$src/.macvnc-patches-applied-${LIBVNCSERVER_PATCH_REV}"
+  local p
+  local tarball="$SRC_DIR/libvncserver-${LIBVNCSERVER_VERSION}.tar.gz"
+  local extract_stamp="$SRC_DIR/.stamp-libvncserver-${LIBVNCSERVER_VERSION}"
+
+  if [[ -f "$marker" && $FORCE -eq 0 ]]; then
+    return 0
+  fi
+
+  need_cmd patch
+
+  # Always start from a pristine extract when (re)applying a patch revision.
+  echo "=== Refreshing LibVNCServer ${LIBVNCSERVER_VERSION} sources for patch rev ${LIBVNCSERVER_PATCH_REV} ==="
+  FORCE=1 extract_once "$tarball" "$src" "$extract_stamp"
+
+  if [[ ! -d "$patch_dir" ]]; then
+    echo "warning: no LibVNCServer patches at $patch_dir" >&2
+    date -u +%Y-%m-%dT%H:%M:%SZ >"$marker"
+    return 0
+  fi
+
+  echo "=== Applying LibVNCServer patches (rev $LIBVNCSERVER_PATCH_REV) ==="
+  shopt -s nullglob
+  for p in "$patch_dir"/*.patch; do
+    echo "  patch: $(basename "$p")"
+    patch -p1 -d "$src" -i "$p"
+  done
+  shopt -u nullglob
+  date -u +%Y-%m-%dT%H:%M:%SZ >"$marker"
+}
+
 build_libvncserver() {
   local arch="$1"
   local prefix="$PREFIX_ROOT/$arch"
   local build="$BUILD_ROOT/libvncserver-$arch"
-  local stamp="$prefix/.stamp-libvncserver-${LIBVNCSERVER_VERSION}"
+  local stamp="$prefix/.stamp-libvncserver-${LIBVNCSERVER_VERSION}-p${LIBVNCSERVER_PATCH_REV}"
 
   if [[ -f "$stamp" && -f "$prefix/lib/libvncserver.a" && $FORCE -eq 0 ]]; then
-    echo "LibVNCServer $LIBVNCSERVER_VERSION ($arch) already built → $prefix"
+    echo "LibVNCServer $LIBVNCSERVER_VERSION-p${LIBVNCSERVER_PATCH_REV} ($arch) already built → $prefix"
     return 0
   fi
 
@@ -194,7 +232,9 @@ build_libvncserver() {
     exit 1
   fi
 
-  echo "=== Building LibVNCServer $LIBVNCSERVER_VERSION for $arch ==="
+  apply_libvncserver_patches "$SRC_DIR/libvncserver-${LIBVNCSERVER_VERSION}"
+
+  echo "=== Building LibVNCServer $LIBVNCSERVER_VERSION-p${LIBVNCSERVER_PATCH_REV} for $arch ==="
   rm -rf "$build"
   mkdir -p "$build"
 
@@ -255,25 +295,50 @@ build_libvncserver() {
     exit 1
   fi
 
-  echo "$LIBVNCSERVER_VERSION" >"$stamp"
+  echo "${LIBVNCSERVER_VERSION}-p${LIBVNCSERVER_PATCH_REV}" >"$stamp"
   echo "LibVNCServer installed → $prefix"
 }
 
 lipo_universal() {
   if [[ ${#ARCHS[@]} -lt 2 ]]; then
-    # Single-arch build: expose the same prefix as "universal" for a stable path.
+    # Single-arch build: do NOT clobber an existing fat universal tree.
+    # Studio→Intel workflows need deps/prefix/universal to stay arm64+x86_64.
     local only="${ARCHS[0]}"
     local uni="$PREFIX_ROOT/universal"
-    rm -rf "$uni"
+    local uni_lib="$uni/lib/libvncserver.a"
+
+    if [[ -L "$uni" ]]; then
+      # Previous single-arch convenience symlink — replace with a pointer to this arch.
+      rm -f "$uni"
+      mkdir -p "$PREFIX_ROOT"
+      ln -sfn "$only" "$uni"
+      echo "Single-arch deps ready → $PREFIX_ROOT/$only (linked as universal)"
+      echo "warning: universal is a symlink to $only only; run ./scripts/build-deps.sh" >&2
+      echo "         (no --arch) before building a fat .app for Intel + Apple Silicon." >&2
+      return 0
+    fi
+
+    if [[ -f "$uni_lib" ]]; then
+      local archs
+      archs="$(lipo -archs "$uni_lib" 2>/dev/null || true)"
+      if [[ "$archs" == *arm64* && "$archs" == *x86_64* ]]; then
+        echo "Keeping existing fat universal deps ($archs); single-arch build updated $only only."
+        return 0
+      fi
+    fi
+
     mkdir -p "$PREFIX_ROOT"
     ln -sfn "$only" "$uni"
     echo "Single-arch deps ready → $PREFIX_ROOT/$only (linked as universal)"
+    echo "warning: universal is a symlink to $only only; run ./scripts/build-deps.sh" >&2
+    echo "         (no --arch) before building a fat .app for Intel + Apple Silicon." >&2
     return 0
   fi
 
   local uni="$PREFIX_ROOT/universal"
   local primary="${ARCHS[0]}"
   echo "=== Creating universal prefix from: ${ARCHS[*]} ==="
+  # Remove symlink or stale tree so we always write a real fat prefix.
   rm -rf "$uni"
   mkdir -p "$uni/lib" "$uni/include" "$uni/lib/cmake" "$uni/lib/pkgconfig"
 
